@@ -1,0 +1,62 @@
+# Public hostname: only /realms and /resources are exposed (Keycloak recommendation).
+# /admin, / and every other path get a 503 from the router.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rhbk-public-realms
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  host: HOST_PLACEHOLDER   # replaced by the overlay
+  path: /realms
+  to:
+    kind: Service
+    name: rhbk-internal
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    externalCertificate:
+      name: rhbk-tls-secret
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rhbk-public-resources
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  host: HOST_PLACEHOLDER   # replaced by the overlay
+  path: /resources
+  to:
+    kind: Service
+    name: rhbk-internal
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    externalCertificate:
+      name: rhbk-tls-secret
+---
+# Admin hostname: every path (the console needs /admin, /realms/master and /resources).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rhbk-admin
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    # haproxy.router.openshift.io/ip_whitelist: "203.0.113.0/24 198.51.100.10"
+spec:
+  host: ADMIN_HOST_PLACEHOLDER   # replaced by the overlay
+  to:
+    kind: Service
+    name: rhbk-internal
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    externalCertificate:
+      name: rhbk-tls-secret

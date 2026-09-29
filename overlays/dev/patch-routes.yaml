@@ -1,0 +1,4 @@
+# Applied to every Route; the admin host is fixed right after by patch-route-admin.yaml.
+- op: replace
+  path: /spec/host
+  value: dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com

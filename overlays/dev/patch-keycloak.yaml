@@ -1,0 +1,21 @@
+- op: replace
+  path: /metadata/name
+  value: rhbk-dev
+- op: replace
+  path: /spec/instances
+  value: 1
+- op: replace
+  path: /spec/hostname/hostname
+  value: https://dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+- op: replace
+  path: /spec/hostname/admin
+  value: https://dev-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+- op: replace
+  path: /spec/resources
+  value:
+    requests:
+      cpu: "500m"
+      memory: "1G"
+    limits:
+      cpu: "1"
+      memory: "1500M"

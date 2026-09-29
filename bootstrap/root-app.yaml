@@ -1,0 +1,20 @@
+# App of apps: apply once by hand (oc apply -f bootstrap/root-app.yaml).
+# It then manages the AppProject and the rhbk-prod / rhbk-dev Applications from argocd/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rhbk-root
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/msakho/rhbk-gitops.git
+    targetRevision: main
+    path: argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

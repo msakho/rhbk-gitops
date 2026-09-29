@@ -1,0 +1,6 @@
+# Ne jamais commiter : identifiants AWS, clés privées, certificats
+cmd.txt
+cert/
+*.key
+*.pem
+*.cer

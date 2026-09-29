@@ -1,0 +1,22 @@
+# Internal Service: the OpenShift service-ca generates a certificate for
+# rhbk-internal.<namespace>.svc in the rhbk-internal-tls secret.
+# Keycloak serves this certificate; the router trusts it automatically in reencrypt mode.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhbk-internal
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: rhbk-internal-tls
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: keycloak
+spec:
+  selector:
+    app: keycloak
+    app.kubernetes.io/managed-by: keycloak-operator
+    app.kubernetes.io/instance: KEYCLOAK_NAME   # replaced by the overlay
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+      protocol: TCP

@@ -1,0 +1,6 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rhbk-admin
+spec:
+  host: prod-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
