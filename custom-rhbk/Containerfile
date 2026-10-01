@@ -1,7 +1,7 @@
 FROM registry.redhat.io/rhbk/keycloak-rhel9:26.6 AS builder
 
 # Build-time options: they are baked into the optimized image and must match the
-# Keycloak CR (cr/rhbk-cr.yaml), since the operator starts a custom image with --optimized.
+# Keycloak CR (base/keycloak/keycloak.yaml), since the operator starts a custom image with --optimized.
 ENV KC_DB=postgres
 ENV KC_HEALTH_ENABLED=true
 ENV KC_METRICS_ENABLED=true
