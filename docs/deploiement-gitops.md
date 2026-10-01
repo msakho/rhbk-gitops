@@ -120,7 +120,7 @@ Ces éléments **ne sont pas gérés par le dépôt**. Vérifie-les avant de com
 | 5 | PostgreSQL dans chaque namespace : Service **`postgres-db`** port 5432, base **`rhbk`** | `oc get svc postgres-db -n rhbk-dev` |
 | 6 | Secret `rhbk-db-secret` (clés `database-username`, `database-password`) | `oc get secret rhbk-db-secret -n rhbk-dev` |
 | 7 | Secret `initial-admin-secret` (clés `username`, `password`) | `oc get secret initial-admin-secret -n rhbk-dev` |
-| 8 | Secret TLS `rhbk-tls-secret` (type `kubernetes.io/tls`), certificat couvrant les 4 hostnames | `oc get secret rhbk-tls-secret -n rhbk-dev` |
+| 8 | Secret TLS `rhbk-tls-secret` (type `kubernetes.io/tls`), certificat couvrant les hostnames public et admin de l'environnement | `oc get secret rhbk-tls-secret -n rhbk-dev` |
 | 9 | Image Keycloak optimisée publiée (voir `custom-rhbk/Containerfile`), avec `KC_DB=postgres`, `KC_HEALTH_ENABLED=true`, `KC_METRICS_ENABLED=true` | `oc image info <image>` |
 | 10 | ArgoCD a les droits sur les namespaces cibles | `oc auth can-i create keycloaks.k8s.keycloak.org -n rhbk-dev --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller` → `yes` |
 | 11 | Outils locaux : `oc` (même version que le cluster), `git`, accès en écriture au dépôt GitHub | `oc version`, `git --version` |
@@ -1172,15 +1172,225 @@ providers…) doit être cohérente avec le CR.
 Modifier le fichier de l'overlay concerné (par exemple les ressources dans
 `overlays/dev/patch-keycloak.yaml`), puis commit et push.
 
-### 15.3 Ajouter un environnement (par exemple `staging`)
+### 15.3 Ajouter un environnement (exemple : `qualif`)
 
-1. Prérequis de la section 2 dans le nouveau namespace.
-2. `cp -r overlays/dev overlays/staging`, puis adapter le namespace, le nom
-   d'instance et les hostnames.
-3. Créer `argocd/applications/rhbk-staging.yaml`, l'ajouter dans
-   `argocd/kustomization.yaml` et ajouter le namespace dans les `destinations` de
-   l'AppProject.
-4. Commit et push : `rhbk-root` crée la nouvelle Application.
+On ajoute un environnement `qualif` en partant de l'overlay `dev`. Les commandes
+ci-dessous sont à lancer à la racine du dépôt.
+
+| | Valeur pour `qualif` |
+|---|---|
+| Namespace | `rhbk-qualif` |
+| Instance Keycloak | `rhbk-qualif` |
+| Hostname public | `qualif-rhbk.<domaine>` |
+| Hostname admin | `qualif-rhbk-admin.<domaine>` |
+| Chemins ExternalSecrets | `rhbk/qualif/...` |
+| Application ArgoCD | `rhbk-qualif` |
+
+#### 15.3.1 Prérequis (hors GitOps)
+
+Les prérequis de la section 2, dans le namespace `rhbk-qualif` :
+
+1. Opérateur RHBK installé dans `rhbk-qualif` (admins).
+2. Base PostgreSQL `postgres-db` (base `rhbk`), secrets `rhbk-db-secret` et
+   `initial-admin-secret`.
+3. **Certificat** : le certificat existant ne couvre que les hostnames prod et
+   dev. Il faut un certificat dont le SAN contient
+   `qualif-rhbk.<domaine>` et `qualif-rhbk-admin.<domaine>`, puis le secret
+   `rhbk-tls-secret` dans `rhbk-qualif`. Vérification :
+
+   ```bash
+   oc get secret rhbk-tls-secret -n rhbk-qualif -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -text | grep DNS:
+   ```
+
+   Sans ce certificat, les routes répondent, mais le navigateur affiche une erreur
+   de certificat.
+
+#### 15.3.2 Créer l'overlay
+
+Copier l'overlay de dev :
+
+```bash
+cp -r overlays/dev overlays/qualif
+```
+
+Remplacer les valeurs de dev dans tous ses fichiers (namespace et nom d'instance,
+hostnames, label `environment`, chemins des ExternalSecrets) :
+
+```bash
+find overlays/qualif -name '*.yaml' -exec sed -i '' -e 's#rhbk-dev#rhbk-qualif#g' -e 's#dev-rhbk#qualif-rhbk#g' -e 's#environment: dev#environment: qualif#g' -e 's#rhbk/dev/#rhbk/qualif/#g' {} +
+```
+
+(Sur Linux, remplacer `sed -i ''` par `sed -i`.)
+
+Ajuster si besoin les ressources CPU/mémoire et le nombre d'instances dans
+`overlays/qualif/patch-keycloak.yaml`.
+
+Résultat attendu, par exemple pour `overlays/qualif/patch-keycloak.yaml` :
+
+```yaml
+- op: replace
+  path: /metadata/name
+  value: rhbk-qualif
+- op: replace
+  path: /spec/instances
+  value: 1
+- op: replace
+  path: /spec/hostname/hostname
+  value: https://qualif-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+- op: replace
+  path: /spec/hostname/admin
+  value: https://qualif-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+- op: replace
+  path: /spec/resources
+  value:
+    requests:
+      cpu: "500m"
+      memory: "1G"
+    limits:
+      cpu: "1"
+      memory: "1500M"
+```
+
+#### 15.3.3 Créer l'Application ArgoCD
+
+À partir de celle de dev :
+
+```bash
+sed -e 's#rhbk-dev#rhbk-qualif#g' -e 's#overlays/dev#overlays/qualif#g' argocd/applications/rhbk-dev.yaml > argocd/applications/rhbk-qualif.yaml
+```
+
+Elle hérite de la synchro **automatique** de dev. Pour une synchro **manuelle**
+comme en prod, supprimer le bloc `automated:` (3 lignes) de
+`argocd/applications/rhbk-qualif.yaml`.
+
+`argocd/applications/rhbk-qualif.yaml` (synchro automatique) :
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rhbk-qualif
+  namespace: openshift-gitops
+spec:
+  project: rhbk
+  source:
+    repoURL: https://github.com/msakho/rhbk-gitops.git
+    targetRevision: main
+    path: overlays/qualif
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rhbk-qualif
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    managedNamespaceMetadata:
+      labels:
+        argocd.argoproj.io/managed-by: openshift-gitops
+```
+
+#### 15.3.4 Déclarer l'Application et le namespace
+
+Ajouter l'Application à la liste gérée par `rhbk-root` :
+
+```bash
+echo '  - applications/rhbk-qualif.yaml' >> argocd/kustomization.yaml
+```
+
+Autoriser le namespace dans l'AppProject (sinon ArgoCD refuse l'Application avec
+`application destination ... is not permitted in project 'rhbk'`) :
+
+```bash
+sed -i '' '/      namespace: rhbk-dev/a\
+    - server: https://kubernetes.default.svc\
+      namespace: rhbk-qualif
+' argocd/appproject.yaml
+```
+
+Résultat attendu dans `argocd/appproject.yaml` :
+
+```yaml
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: rhbk
+    - server: https://kubernetes.default.svc
+      namespace: rhbk-dev
+    - server: https://kubernetes.default.svc
+      namespace: rhbk-qualif
+```
+
+#### 15.3.5 Valider en local
+
+Aucune référence à dev ne doit rester :
+
+```bash
+grep -rn 'dev' overlays/qualif argocd/applications/rhbk-qualif.yaml || echo "OK : plus aucune référence à dev"
+```
+
+Rendu et valeurs clés :
+
+```bash
+oc kustomize overlays/qualif | grep -nE '^  namespace:|host:|hostname:|admin: https|instance:|PLACEHOLDER'
+```
+
+```bash
+oc kustomize argocd | grep -nE 'name: rhbk-|path: overlays'
+```
+
+Dry-run côté serveur (le namespace doit exister) :
+
+```bash
+oc apply --dry-run=server -k overlays/qualif
+```
+
+#### 15.3.6 Déployer
+
+```bash
+git add overlays/qualif argocd && git commit -m "Add qualif environment" && git push
+```
+
+`rhbk-root` (synchro automatique) met à jour l'AppProject et crée l'Application
+`rhbk-qualif`. Suivre son état :
+
+```bash
+oc get application rhbk-qualif -n openshift-gitops -w
+```
+
+En synchro manuelle, lancer **Sync** depuis la console ArgoCD (section 12.2).
+
+#### 15.3.7 Tester
+
+Le script de la section 13.2 avec `qualif` :
+
+```bash
+D=apps.cluster-nnljw.nnljw.sandbox742.opentlc.com; P=https://qualif-rhbk.$D; A=https://qualif-rhbk-admin.$D
+for u in "$P/admin/master/console/" "$P/realms/master/.well-known/openid-configuration" "$A/admin/master/console/"; do printf "%s tls=%s  %s\n" $(curl -s -o /dev/null -w '%{http_code} %{ssl_verify_result}' "$u") "$u"; done
+```
+
+Attendu : 503, 200, 200, et `tls=0` partout. Ensuite, se connecter avec l'admin
+temporaire (`oc extract secret/initial-admin-secret -n rhbk-qualif --to=-`), créer
+un admin permanent et supprimer l'utilisateur temporaire.
+
+#### 15.3.8 Supprimer l'environnement
+
+Faire l'inverse dans le dépôt : supprimer `overlays/qualif` et
+`argocd/applications/rhbk-qualif.yaml`, retirer la ligne de
+`argocd/kustomization.yaml` et la destination de l'AppProject, puis commit et push.
+`rhbk-root` supprime l'Application `rhbk-qualif`.
+
+Comme l'Application n'a pas de finalizer, **les ressources déployées restent en
+place** (Keycloak, routes…). Pour les supprimer aussi, ajouter avant le commit le
+finalizer à l'Application et attendre sa prise en compte :
+
+```bash
+oc patch application rhbk-qualif -n openshift-gitops --type merge -p '{"metadata":{"finalizers":["resources-finalizer.argocd.argoproj.io"]}}'
+```
+
+La base, les secrets créés à la main et l'opérateur ne sont jamais supprimés par
+ArgoCD : ils sont à retirer à la main (admins).
 
 ### 15.4 Activer les ExternalSecrets
 
