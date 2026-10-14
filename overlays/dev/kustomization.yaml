@@ -9,8 +9,8 @@ labels:
 
 resources:
   - ../../base/keycloak
-  # ExternalSecrets: enable once External Secrets Operator and the ClusterSecretStore exist.
-  # - external-secrets
+  # ExternalSecrets from Vault (ClusterSecretStore vault-store, platform/eso/).
+  - external-secrets
 
 patches:
   - path: patch-keycloak.yaml
