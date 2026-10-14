@@ -16,8 +16,9 @@ base/
   keycloak/                    CR Keycloak, Service interne, RBAC routeur, Routes
 overlays/
   prod/ dev/                   Namespace, nom d'instance, hostnames, ressources
-    external-secrets/          ExternalSecrets (désactivés, voir plus bas)
+    external-secrets/          ExternalSecrets : secrets lus dans Vault via ESO
 custom-rhbk/Containerfile      Image Keycloak optimisée (quay.io/msakho0/mskeycloak)
+platform/                      Hors ArgoCD (admins) : config ESO, ClusterSecretStore, valeurs Helm Vault
 ```
 
 | | prod | dev |
@@ -48,30 +49,29 @@ Les routes sont en **reencrypt** : le routeur présente le certificat Let's Encr
 
 L'Ingress de l'opérateur est désactivé (`ingress.enabled: false`).
 
-## Hors GitOps (à créer à la main dans chaque namespace)
+## Hors GitOps (administrateurs)
 
-L'opérateur et la base PostgreSQL ne sont pas gérés par ce dépôt. Avant la première synchronisation d'un environnement :
+Avant la première synchronisation d'un environnement :
 
-0. **Opérateur RHBK** (administrateurs) : installé dans le namespace, canal `stable-v26.6`.
+1. **Opérateur RHBK** installé dans le namespace, canal `stable-v26.6`.
    L'opérateur ne supporte que les modes OwnNamespace / SingleNamespace : une installation par namespace.
-1. **Base PostgreSQL** : Service `postgres-db` (port 5432), base `rhbk`.
-2. **Secrets** (tant que les ExternalSecrets ne sont pas activés) :
+2. **Base PostgreSQL** : Service `postgres-db` (port 5432), base `rhbk`.
+3. **Valeurs dans Vault** sous `secret/rhbk/<env>/` : `db`, `bootstrap-admin`, `tls`.
+
+Une seule fois pour le cluster : External Secrets Operator, Vault et le `ClusterSecretStore vault-store`
+(manifestes dans `platform/`, procédure dans l'annexe A du guide).
+
+## Secrets
+
+Aucun secret n'est dans git. Les `ExternalSecret` de `overlays/<env>/external-secrets/` font créer par ESO,
+depuis Vault, les Secrets `rhbk-db-secret`, `initial-admin-secret` et `rhbk-tls-secret`.
+
+Après un redémarrage du cluster, Vault est scellé : le desceller (la clé est dans `vault-init.json`,
+ignoré par git) :
 
 ```bash
-NS=rhbk-dev
-oc create secret tls rhbk-tls-secret --cert ./cert/rhbk.fullchain.pem --key ./cert/rhbk.key.pem -n $NS
-oc create secret generic rhbk-db-secret --from-literal=database-username=<user> --from-literal=database-password=<password> -n $NS
-oc create secret generic initial-admin-secret --from-literal=username=<admin> --from-literal=password=<password> -n $NS
+oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
 ```
-
-Le certificat Let's Encrypt couvre les 4 hostnames (prod, prod-admin, dev, dev-admin).
-
-## Activer les ExternalSecrets
-
-1. Installer External Secrets Operator et créer le `ClusterSecretStore`.
-2. Dans `overlays/<env>/external-secrets/*.yaml`, remplacer `CHANGE_ME-secret-store` et adapter les chemins `rhbk/<env>/...`.
-3. Décommenter `- external-secrets` dans `overlays/<env>/kustomization.yaml`.
-4. Supprimer les secrets créés à la main (ESO les recrée, `creationPolicy: Owner`).
 
 ## Mise en route
 
@@ -79,27 +79,12 @@ Le certificat Let's Encrypt couvre les 4 hostnames (prod, prod-admin, dev, dev-a
    `argocd/appproject.yaml` et `argocd/applications/*.yaml`.
 2. Pousser le dépôt.
 3. Si le dépôt devient privé, le déclarer dans ArgoCD (Settings > Repositories).
-4. Préparer la migration de la prod (section suivante) ; pour dev, faire installer l'opérateur dans `rhbk-dev`
-   et créer la base et les secrets.
+4. Vérifier les prérequis de la section « Hors GitOps » pour chaque environnement.
 5. Appliquer l'app of apps :
 
 ```bash
 oc apply -f bootstrap/root-app.yaml
 ```
-
-### Migration de la prod existante (une seule fois)
-
-L'instance prod a été créée à la main avec d'autres noms. Avant la première synchro de `rhbk-prod` :
-
-```bash
-# Anciennes ressources de test, remplacées par rhbk-internal / rhbk-admin / rhbk-public-*
-oc delete route rhbk-prod-admin rhbk-prod-public-realms rhbk-prod-public-resources -n rhbk
-oc delete service rhbk-prod-internal -n rhbk
-oc delete secret rhbk-prod-internal-tls -n rhbk
-```
-
-Puis lancer la synchro de `rhbk-prod` dans ArgoCD. Keycloak redémarre avec le nouveau certificat interne
-(interruption d'environ 1 minute). Le CR `rhbk-prod` est repris tel quel ; l'installation de l'opérateur n'est pas touchée.
 
 ## Nouvelle image Keycloak
 
