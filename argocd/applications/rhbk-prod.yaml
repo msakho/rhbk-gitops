@@ -14,9 +14,6 @@ spec:
     namespace: rhbk
   syncPolicy:
     # Prod: manual sync (review the diff in ArgoCD, then Sync).
+    # The namespace is created by the platform repository (rhbk-platform).
     syncOptions:
-      - CreateNamespace=true
       - ServerSideApply=true
-    managedNamespaceMetadata:
-      labels:
-        argocd.argoproj.io/managed-by: openshift-gitops

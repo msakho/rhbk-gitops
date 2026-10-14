@@ -4,10 +4,16 @@ Ce guide décrit, étape par étape, comment construire un dépôt GitOps qui d�
 Red Hat build of Keycloak (RHBK) 26.6 sur OpenShift avec OpenShift GitOps (ArgoCD),
 pour deux environnements : **prod** et **dev**.
 
-Il couvre **uniquement la partie GitOps**. L'opérateur RHBK, la base PostgreSQL et
-la plateforme de secrets (External Secrets Operator + Vault) sont des prérequis
-(section 2), réalisés par les administrateurs. L'installation de la plateforme de
-secrets est décrite à part, dans l'annexe A (section 17).
+Il couvre **uniquement la partie applicative**. Les namespaces, l'opérateur RHBK,
+External Secrets Operator (ESO) et Vault sont gérés par les administrateurs dans un
+second dépôt GitOps, [`rhbk-platform`](https://github.com/msakho/rhbk-platform), décrit dans son README et dans
+l'annexe A (section 17). La base PostgreSQL est créée à la main. Tout cela forme les
+prérequis de la section 2.
+
+| Dépôt | Contenu | Droits ArgoCD |
+|---|---|---|
+| `rhbk-platform` (administrateurs) | namespaces, opérateurs RHBK et ESO, configuration ESO, `ClusterSecretStore`, Vault | ressources cluster autorisées |
+| `rhbk-gitops` (ce guide) | CR Keycloak, routes, ExternalSecrets | **aucune** ressource cluster |
 
 En suivant ce guide dans un dépôt vide, on obtient exactement le dépôt
 `https://github.com/msakho/rhbk-gitops`.
@@ -32,7 +38,7 @@ En suivant ce guide dans un dépôt vide, on obtient exactement le dépôt
 14. [Rejouer l'exercice sur le même cluster](#14-rejouer-lexercice-sur-le-même-cluster)
 15. [Exploitation courante](#15-exploitation-courante)
 16. [Dépannage](#16-dépannage)
-17. [Annexe A : plateforme ESO et Vault (administrateurs)](#17-annexe-a--plateforme-eso-et-vault-administrateurs)
+17. [Annexe A : plateforme (dépôt rhbk-platform) et Vault](#17-annexe-a--plateforme-dépôt-rhbk-platform-et-vault)
 
 ---
 
@@ -118,10 +124,10 @@ Ces éléments **ne sont pas gérés par le dépôt**. Vérifie-les avant de com
 |---|---|---|
 | 1 | OpenShift 4.16+ (pour `externalCertificate` sur les Routes) — testé en 4.20 | `oc version` |
 | 2 | OpenShift GitOps installé, instance `openshift-gitops` | `oc get argocd -n openshift-gitops` |
-| 3 | Namespaces `rhbk` et `rhbk-dev` | `oc get ns rhbk rhbk-dev` |
-| 4 | Opérateur RHBK installé **dans chaque namespace** (canal `stable-v26.6`). Il ne supporte que OwnNamespace/SingleNamespace. | `oc get csv -n rhbk-dev \| grep rhbk` → `Succeeded` |
+| 3 | Namespaces `rhbk` et `rhbk-dev` (créés par `rhbk-platform`) | `oc get ns rhbk rhbk-dev` |
+| 4 | Opérateur RHBK installé **dans chaque namespace** par `rhbk-platform` (canal `stable-v26.6`). Il ne supporte que OwnNamespace/SingleNamespace. | `oc get csv -n rhbk-dev \| grep rhbk` → `Succeeded` |
 | 5 | PostgreSQL dans chaque namespace : Service **`postgres-db`** port 5432, base **`rhbk`** | `oc get svc postgres-db -n rhbk-dev` |
-| 6 | External Secrets Operator démarré et `ClusterSecretStore vault-store` valide (annexe A) | `oc get clustersecretstore vault-store` → `Valid`, `READY True` |
+| 6 | External Secrets Operator démarré et `ClusterSecretStore vault-store` valide (`rhbk-platform`, annexe A) | `oc get clustersecretstore vault-store` → `Valid`, `READY True` |
 | 7 | Valeurs rangées dans Vault pour l'environnement : `secret/rhbk/<env>/db` (`username`, `password`), `secret/rhbk/<env>/bootstrap-admin` (`username`, `password`), `secret/rhbk/<env>/tls` (`tls.crt` = fullchain, `tls.key`) | `oc exec -n vault vault-0 -- vault kv list -mount=secret rhbk/dev` (avec un token, voir annexe A.5) |
 | 8 | Certificat (`tls.crt`) couvrant les hostnames public et admin de l'environnement | voir ci-dessous |
 | 9 | Image Keycloak optimisée publiée (voir `custom-rhbk/Containerfile`), avec `KC_DB=postgres`, `KC_HEALTH_ENABLED=true`, `KC_METRICS_ENABLED=true` | `oc image info <image>` |
@@ -143,10 +149,9 @@ oc get secret rhbk-tls-secret -n rhbk-dev -o jsonpath='{.data.tls\.crt}' | base6
 
 Les hostnames public et admin de l'environnement (section 3) doivent apparaître.
 
-> **Si le prérequis 10 répond `no`**, ajoute le label
-> `argocd.argoproj.io/managed-by=openshift-gitops` sur chaque namespace (les
-> Applications le posent aussi via `managedNamespaceMetadata`, mais seulement après
-> une première synchro réussie).
+> **Si le prérequis 10 répond `no`**, vérifie que le namespace porte le label
+> `argocd.argoproj.io/managed-by=openshift-gitops` : il est posé par `rhbk-platform`
+> (`operators/rhbk/base/namespace.yaml`).
 
 ---
 
@@ -194,7 +199,7 @@ mkdir -p ~/rhbk-gitops-v2 && cd ~/rhbk-gitops-v2
 ```
 
 ```bash
-mkdir -p bootstrap argocd/applications base/keycloak overlays/prod/external-secrets overlays/dev/external-secrets custom-rhbk docs platform/eso platform/vault
+mkdir -p bootstrap argocd/applications base/keycloak overlays/prod/external-secrets overlays/dev/external-secrets custom-rhbk docs
 ```
 
 Arborescence cible :
@@ -232,12 +237,6 @@ overlays/
     (mêmes fichiers que prod)
 custom-rhbk/
   Containerfile
-platform/                  hors ArgoCD, appliqué par les admins (annexe A)
-  eso/
-    externalsecretsconfig.yaml
-    clustersecretstore.yaml
-  vault/
-    values.yaml
 docs/
   deploiement-gitops.md
 ```
@@ -540,7 +539,7 @@ labels:
 
 resources:
   - ../../base/keycloak
-  # ExternalSecrets from Vault (ClusterSecretStore vault-store, platform/eso/).
+  # ExternalSecrets from Vault (ClusterSecretStore vault-store, defined in the rhbk-platform repository).
   - external-secrets
 
 patches:
@@ -842,8 +841,8 @@ for f in kustomization rhbk-db-secret initial-admin-secret rhbk-tls-secret; do s
 ### 8.1 `argocd/appproject.yaml`
 
 Le projet `rhbk` limite ce que ses Applications peuvent faire : un seul dépôt
-source, deux namespaces cibles, et comme seule ressource de niveau cluster le
-`Namespace` (pour `CreateNamespace=true`).
+source, deux namespaces cibles, et **aucune ressource de niveau cluster** : les
+namespaces et les opérateurs appartiennent à `rhbk-platform`.
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -860,9 +859,8 @@ spec:
       namespace: rhbk
     - server: https://kubernetes.default.svc
       namespace: rhbk-dev
-  clusterResourceWhitelist:
-    - group: ""
-      kind: Namespace
+  # No cluster-scoped resource: namespaces and operators belong to the platform repository (rhbk-platform).
+  clusterResourceWhitelist: []
   namespaceResourceWhitelist:
     - group: "*"
       kind: "*"
@@ -872,6 +870,10 @@ spec:
 
 Prod est en **synchro manuelle** : pas de bloc `automated`. ArgoCD détecte les
 écarts (`OutOfSync`) mais n'applique rien sans un clic sur **Sync**.
+
+Pas de `CreateNamespace` ni de `managedNamespaceMetadata` : le namespace est créé et
+étiqueté par `rhbk-platform`. Si les deux dépôts géraient les métadonnées du
+namespace, les Applications de la plateforme resteraient `OutOfSync`.
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -890,12 +892,9 @@ spec:
     namespace: rhbk
   syncPolicy:
     # Prod: manual sync (review the diff in ArgoCD, then Sync).
+    # The namespace is created by the platform repository (rhbk-platform).
     syncOptions:
-      - CreateNamespace=true
       - ServerSideApply=true
-    managedNamespaceMetadata:
-      labels:
-        argocd.argoproj.io/managed-by: openshift-gitops
 ```
 
 ### 8.3 `argocd/applications/rhbk-dev.yaml`
@@ -923,12 +922,9 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    # The namespace is created by the platform repository (rhbk-platform).
     syncOptions:
-      - CreateNamespace=true
       - ServerSideApply=true
-    managedNamespaceMetadata:
-      labels:
-        argocd.argoproj.io/managed-by: openshift-gitops
 ```
 
 ### 8.4 `argocd/kustomization.yaml`
@@ -1008,7 +1004,7 @@ de l'instance dans le sélecteur.
 **9.4 Dry-run côté serveur** (connecté au cluster) :
 
 Il échoue sur les `ExternalSecret` si ESO n'est pas installé (CRD absente) : voir
-le prérequis 6.
+le prérequis 6. Le namespace doit aussi exister (prérequis 3).
 
 ```bash
 oc apply --dry-run=server -k overlays/dev
@@ -1272,7 +1268,8 @@ ci-dessous sont à lancer à la racine du dépôt.
 
 Les prérequis de la section 2, dans le namespace `rhbk-qualif` :
 
-1. Opérateur RHBK installé dans `rhbk-qualif` (admins).
+1. Namespace `rhbk-qualif` et opérateur RHBK : dans `rhbk-platform` (README,
+   « Ajouter un environnement »), à synchroniser **avant** l'étape 15.3.6.
 2. Base PostgreSQL `postgres-db` (base `rhbk`).
 3. **Valeurs dans Vault** sous `secret/rhbk/qualif/` : `db`, `bootstrap-admin` et
    `tls` (voir annexe A.7). Les ExternalSecrets de l'overlay les liront après la
@@ -1368,12 +1365,9 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    # The namespace is created by the platform repository (rhbk-platform).
     syncOptions:
-      - CreateNamespace=true
       - ServerSideApply=true
-    managedNamespaceMetadata:
-      labels:
-        argocd.argoproj.io/managed-by: openshift-gitops
 ```
 
 #### 15.3.4 Déclarer l'Application et le namespace
@@ -1514,10 +1508,11 @@ pod `vault-0`) :
 Tant que Vault est scellé, on ne peut ni changer un secret (section 15.4) ni
 déployer un nouvel environnement (ses valeurs ne peuvent pas être lues).
 
-**Desceller Vault** (annexe A.4) :
+**Desceller Vault** (annexe A.4), depuis le dossier local du dépôt `rhbk-platform`,
+où se trouve `vault-init.json` :
 
 ```bash
-oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
+cd /usr/local/dev/rhbk-platform && oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
 ```
 
 **Vérifier le retour à la normale** (environ 20 secondes pour le store, puis les
@@ -1563,163 +1558,54 @@ ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 
 ---
 
-## 17. Annexe A : plateforme ESO et Vault (administrateurs)
+## 17. Annexe A : plateforme (dépôt rhbk-platform) et Vault
 
-Cette partie **n'est pas gérée par ArgoCD** : c'est la plateforme dont dépendent
-les ExternalSecrets. Les manifestes sont gardés dans `platform/` pour mémoire.
+La plateforme est gérée par les administrateurs dans le dépôt GitOps
+[`rhbk-platform`](https://github.com/msakho/rhbk-platform) (AppProject `platform`,
+Applications en synchro manuelle). Son README décrit l'arborescence, l'ordre de
+déploiement et l'ajout d'un environnement. Cette annexe résume ce qu'il faut en savoir
+côté application, et détaille les **étapes manuelles de Vault**, qui ne sont pas
+déclaratives.
 
 ```
-namespace external-secrets-operator : opérateur ESO (Red Hat)
-namespace external-secrets          : ESO (contrôleur, webhook, cert-controller)
-namespace vault                     : Vault 1 nœud, stockage Raft sur PVC
-ClusterSecretStore vault-store      : connexion ESO → Vault (auth Kubernetes)
+namespace external-secrets-operator : opérateur ESO (Red Hat)        Application eso-operator
+namespace external-secrets          : ESO (créé par l'opérateur)      Application eso-config
+namespace vault                     : Vault 1 nœud, Raft sur PVC      Application vault (Helm)
+ClusterSecretStore vault-store      : ESO -> Vault (auth Kubernetes)  Application eso-config
+namespaces rhbk, rhbk-dev           : namespace + opérateur RHBK      Applications rhbk-operator-<env>
 ```
 
-### A.1 Installer l'opérateur ESO
+### A.1 Ordre de déploiement de la plateforme
 
-Console : **Operators → OperatorHub**, chercher **External Secrets Operator for
-Red Hat OpenShift** (badge *Red Hat*, catalogue `redhat-operators`, **pas** la
-version *Community*). Installer avec les valeurs proposées : canal `stable-v1`,
-mode *All namespaces*, namespace `external-secrets-operator`.
+| Étape | Dans `rhbk-platform` |
+|---|---|
+| 1 | `oc apply -f bootstrap/root-app.yaml` (crée l'AppProject et les Applications, sans rien synchroniser) |
+| 2 | Sync `eso-operator` |
+| 3 | Sync `vault`, puis **étapes manuelles A.4, A.5 et A.7** |
+| 4 | Sync `eso-config` → `oc get clustersecretstore vault-store` : `Valid` |
+| 5 | Sync `rhbk-operator-<env>` (namespace + opérateur RHBK) |
+| 6 | Puis, dans ce dépôt : bootstrap applicatif (section 11) |
 
-Vérifier :
+### A.2 Deux pièges déjà traités dans `rhbk-platform`
+
+- **NetworkPolicies d'ESO** : l'opérateur Red Hat isole les pods ESO avec des
+  NetworkPolicies *deny-all* (seuls l'API Kubernetes et le DNS sont autorisés). La
+  sortie vers Vault (namespace `vault`, port 8200) est ouverte dans
+  `eso/externalsecretsconfig.yaml` (`spec.controllerConfig.networkPolicies`) ;
+  l'opérateur crée la NetworkPolicy `eso-user-allow-egress-to-vault`. Une
+  NetworkPolicy créée à la main serait supprimée par l'opérateur.
+- **Image Vault** : sur OpenShift, le nom court `hashicorp/vault` est d'abord cherché
+  dans `registry.connect.redhat.com`, où ce tag n'existe pas (`ImagePullBackOff`).
+  `vault/values.yaml` indique le nom complet `docker.io/hashicorp/vault`.
+
+### A.3 Où sont les secrets de Vault
+
+`vault-init.json` (clé de descellement et token root) est conservé **dans le dossier
+local du dépôt `rhbk-platform`**, ignoré par git. Les commandes A.4 à A.7 sont à
+lancer depuis ce dossier :
 
 ```bash
-oc get csv -n external-secrets-operator | grep external-secrets
-```
-
-Phase `Succeeded`.
-
-### A.2 Démarrer ESO (`ExternalSecretsConfig`)
-
-L'opérateur ne démarre ESO qu'à la création de l'`ExternalSecretsConfig`, une
-ressource unique qui doit s'appeler `cluster`.
-
-**Piège** : l'opérateur isole les pods ESO avec des NetworkPolicies *deny-all* ;
-seuls l'API Kubernetes et le DNS sont autorisés. **Chaque coffre doit être ouvert
-explicitement**, dans `spec.controllerConfig.networkPolicies`. L'opérateur crée alors
-la NetworkPolicy `eso-user-<nom>`. Une NetworkPolicy créée à la main serait supprimée
-par l'opérateur.
-
-`platform/eso/externalsecretsconfig.yaml`
-```yaml
-# Platform (admins), not synced by ArgoCD.
-# Starts the external-secrets operand (controller, webhook, cert-controller) managed by
-# the "External Secrets Operator for Red Hat OpenShift". Singleton: the name must be "cluster".
-apiVersion: operator.openshift.io/v1alpha1
-kind: ExternalSecretsConfig
-metadata:
-  name: cluster
-spec:
-  controllerConfig:
-    # The operator isolates the ESO pods with deny-all NetworkPolicies (only the API server and
-    # DNS are allowed). Each secret backend must be opened explicitly: here, Vault in the "vault"
-    # namespace on port 8200. Created as NetworkPolicy "eso-user-allow-egress-to-vault".
-    networkPolicies:
-      - name: allow-egress-to-vault
-        componentName: ExternalSecretsCoreController
-        egress:
-          - to:
-              - namespaceSelector:
-                  matchLabels:
-                    kubernetes.io/metadata.name: vault
-                podSelector:
-                  matchLabels:
-                    app.kubernetes.io/name: vault
-            ports:
-              - protocol: TCP
-                port: 8200
-```
-
-```bash
-oc apply -f platform/eso/externalsecretsconfig.yaml
-```
-
-Vérifier : `Ready=True` et trois pods dans `external-secrets`.
-
-```bash
-oc get externalsecretsconfig cluster -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
-```
-
-```bash
-oc get pods -n external-secrets
-```
-
-### A.3 Installer Vault (Helm)
-
-Vault 1 nœud, stockage **Raft sur un PVC** : les secrets survivent aux redémarrages
-du cluster. Pas d'injector (ESO distribue les secrets). Interface web exposée par une
-route.
-
-**Piège** : sur OpenShift, le nom d'image court `hashicorp/vault` est d'abord cherché
-dans `registry.connect.redhat.com`, où ce tag n'existe pas (`ImagePullBackOff`). Le
-nom complet `docker.io/hashicorp/vault` est donc indiqué.
-
-`platform/vault/values.yaml`
-```yaml
-# Platform (admins), not synced by ArgoCD.
-# HashiCorp Vault for ESO, sandbox setup: 1 node, integrated Raft storage on a PVC
-# (data survives cluster restarts; Vault must be unsealed after each pod restart).
-# helm install vault hashicorp/vault --version 0.34.1 -n vault -f platform/vault/values.yaml
-global:
-  openshift: true
-
-injector:
-  enabled: false        # secrets are delivered by ESO, no sidecar injection
-
-server:
-  image:
-    # Fully qualified: on OpenShift the short name resolves to registry.connect.redhat.com first.
-    repository: docker.io/hashicorp/vault
-    tag: "2.0.4"
-  dataStorage:
-    enabled: true
-    size: 1Gi
-    storageClass: ocs-storagecluster-ceph-rbd
-  ha:
-    enabled: true
-    replicas: 1
-    raft:
-      enabled: true
-      setNodeId: true
-      config: |
-        ui = true
-
-        listener "tcp" {
-          tls_disable = 1
-          address = "[::]:8200"
-          cluster_address = "[::]:8201"
-        }
-
-        storage "raft" {
-          path = "/vault/data"
-        }
-
-        service_registration "kubernetes" {}
-  route:
-    enabled: true
-    host: vault.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
-    tls:
-      termination: edge
-      insecureEdgeTerminationPolicy: Redirect
-
-ui:
-  enabled: true
-```
-
-```bash
-helm repo add hashicorp https://helm.releases.hashicorp.com && helm repo update hashicorp
-```
-
-```bash
-helm install vault hashicorp/vault --version 0.34.1 -n vault --create-namespace -f platform/vault/values.yaml
-```
-
-Vérifier : pod `vault-0` en `Running` (pas `Ready` : normal tant que Vault est
-scellé), statut `Initialized false`, `Sealed true`, `Storage Type raft`.
-
-```bash
-oc exec -n vault vault-0 -- vault status
+cd /usr/local/dev/rhbk-platform
 ```
 
 ### A.4 Initialiser et desceller Vault
@@ -1791,41 +1677,17 @@ EOF
 L'avertissement `Role external-secrets does not have an audience configured` est
 sans conséquence ici.
 
-### A.6 Créer le `ClusterSecretStore`
+### A.6 Vérifier le `ClusterSecretStore`
 
-`platform/eso/clustersecretstore.yaml`
-```yaml
-# Platform (admins), not synced by ArgoCD.
-# How ESO connects to Vault: KV v2 engine "secret", Kubernetes auth with ESO's ServiceAccount
-# (Vault role "external-secrets", read-only policy "rhbk-read" on secret/rhbk/*).
-apiVersion: external-secrets.io/v1
-kind: ClusterSecretStore
-metadata:
-  name: vault-store
-spec:
-  provider:
-    vault:
-      server: http://vault-active.vault.svc:8200
-      path: secret
-      version: v2
-      auth:
-        kubernetes:
-          mountPath: kubernetes
-          role: external-secrets
-          serviceAccountRef:
-            name: external-secrets
-            namespace: external-secrets
-```
-
-```bash
-oc apply -f platform/eso/clustersecretstore.yaml
-```
-
-Vérifier : `STATUS Valid`, `READY True`.
+Le `ClusterSecretStore vault-store` est déployé par l'Application `eso-config` de
+`rhbk-platform` (`eso/clustersecretstore.yaml`) : ESO se connecte à
+`http://vault-active.vault.svc:8200` avec l'auth Kubernetes (rôle `external-secrets`).
 
 ```bash
 oc get clustersecretstore vault-store
 ```
+
+`STATUS Valid`, `READY True`.
 
 ### A.7 Ranger les valeurs d'un environnement dans Vault
 

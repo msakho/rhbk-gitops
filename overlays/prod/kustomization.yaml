@@ -9,7 +9,7 @@ labels:
 
 resources:
   - ../../base/keycloak
-  # ExternalSecrets from Vault (ClusterSecretStore vault-store, platform/eso/).
+  # ExternalSecrets from Vault (ClusterSecretStore vault-store, defined in the rhbk-platform repository).
   - external-secrets
 
 patches:

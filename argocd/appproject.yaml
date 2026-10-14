@@ -12,9 +12,8 @@ spec:
       namespace: rhbk
     - server: https://kubernetes.default.svc
       namespace: rhbk-dev
-  clusterResourceWhitelist:
-    - group: ""
-      kind: Namespace
+  # No cluster-scoped resource: namespaces and operators belong to the platform repository (rhbk-platform).
+  clusterResourceWhitelist: []
   namespaceResourceWhitelist:
     - group: "*"
       kind: "*"

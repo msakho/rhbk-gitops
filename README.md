@@ -18,7 +18,6 @@ overlays/
   prod/ dev/                   Namespace, nom d'instance, hostnames, ressources
     external-secrets/          ExternalSecrets : secrets lus dans Vault via ESO
 custom-rhbk/Containerfile      Image Keycloak optimisée (quay.io/msakho0/mskeycloak)
-platform/                      Hors ArgoCD (admins) : config ESO, ClusterSecretStore, valeurs Helm Vault
 ```
 
 | | prod | dev |
@@ -49,28 +48,27 @@ Les routes sont en **reencrypt** : le routeur présente le certificat Let's Encr
 
 L'Ingress de l'opérateur est désactivé (`ingress.enabled: false`).
 
-## Hors GitOps (administrateurs)
+## Prérequis (plateforme)
 
-Avant la première synchronisation d'un environnement :
+Les namespaces, l'opérateur RHBK (un par namespace, canal `stable-v26.6`), External Secrets Operator, Vault et le
+`ClusterSecretStore vault-store` sont gérés par les administrateurs dans le dépôt GitOps
+[`rhbk-platform`](https://github.com/msakho/rhbk-platform). Ce dépôt-ci n'a **aucun droit au niveau cluster**.
 
-1. **Opérateur RHBK** installé dans le namespace, canal `stable-v26.6`.
-   L'opérateur ne supporte que les modes OwnNamespace / SingleNamespace : une installation par namespace.
-2. **Base PostgreSQL** : Service `postgres-db` (port 5432), base `rhbk`.
-3. **Valeurs dans Vault** sous `secret/rhbk/<env>/` : `db`, `bootstrap-admin`, `tls`.
+Restent à faire à la main, par environnement :
 
-Une seule fois pour le cluster : External Secrets Operator, Vault et le `ClusterSecretStore vault-store`
-(manifestes dans `platform/`, procédure dans l'annexe A du guide).
+1. **Base PostgreSQL** : Service `postgres-db` (port 5432), base `rhbk`.
+2. **Valeurs dans Vault** sous `secret/rhbk/<env>/` : `db`, `bootstrap-admin`, `tls` (guide, annexe A.7).
 
 ## Secrets
 
 Aucun secret n'est dans git. Les `ExternalSecret` de `overlays/<env>/external-secrets/` font créer par ESO,
 depuis Vault, les Secrets `rhbk-db-secret`, `initial-admin-secret` et `rhbk-tls-secret`.
 
-Après un redémarrage du cluster, Vault est scellé : le desceller (la clé est dans `vault-init.json`,
-ignoré par git) :
+Après un redémarrage du cluster, Vault est scellé : le desceller, depuis le dossier local du dépôt
+`rhbk-platform` (la clé est dans `vault-init.json`, ignoré par git) :
 
 ```bash
-oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
+cd /usr/local/dev/rhbk-platform && oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
 ```
 
 ## Mise en route
@@ -79,7 +77,7 @@ oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;pri
    `argocd/appproject.yaml` et `argocd/applications/*.yaml`.
 2. Pousser le dépôt.
 3. Si le dépôt devient privé, le déclarer dans ArgoCD (Settings > Repositories).
-4. Vérifier les prérequis de la section « Hors GitOps » pour chaque environnement.
+4. Vérifier les prérequis (plateforme) pour chaque environnement.
 5. Appliquer l'app of apps :
 
 ```bash
