@@ -1496,14 +1496,50 @@ Les valeurs sont dans Vault ; le dépôt ne change pas.
 
 ### 15.5 Après un redémarrage du cluster
 
-Vault redémarre **scellé** : ESO ne peut plus lire les valeurs (les Secrets déjà
-créés restent en place, Keycloak démarre normalement). Desceller Vault (annexe A.4) :
+Tout redémarre seul (PostgreSQL, Keycloak, ArgoCD, ESO, Vault et leurs données),
+**sauf une étape : Vault redémarre scellé** et doit être descellé à la main.
+
+**Ce qui se passe tant que Vault est scellé** (comportement vérifié en supprimant le
+pod `vault-0`) :
+
+| Élément | État |
+|---|---|
+| Pod `vault-0` | `Running` mais non prêt ; `vault status` → `Sealed true` ; interface web en 503 |
+| `ClusterSecretStore vault-store` | `InvalidProviderConfig`, `READY False` |
+| ExternalSecrets | passent en `SecretSyncedError` à leur rafraîchissement suivant (au plus tard 1 h) |
+| Secrets Kubernetes | **conservés** (`deletionPolicy: Retain`) |
+| Keycloak | **fonctionne normalement** : il lit les Secrets déjà présents dans le cluster |
+| ArgoCD | `rhbk-prod` / `rhbk-dev` en `Degraded` (reflet des ExternalSecrets), toujours `Synced` |
+
+Tant que Vault est scellé, on ne peut ni changer un secret (section 15.4) ni
+déployer un nouvel environnement (ses valeurs ne peuvent pas être lues).
+
+**Desceller Vault** (annexe A.4) :
 
 ```bash
 oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
 ```
 
-Puis vérifier `oc get clustersecretstore vault-store` → `Valid`.
+**Vérifier le retour à la normale** (environ 20 secondes pour le store, puis les
+ExternalSecrets à leur prochaine lecture) :
+
+```bash
+oc get clustersecretstore vault-store
+```
+
+`STATUS Valid`, `READY True`.
+
+Pour ne pas attendre le rafraîchissement suivant des ExternalSecrets :
+
+```bash
+for ns in rhbk rhbk-dev; do for es in rhbk-db-secret initial-admin-secret rhbk-tls-secret; do oc annotate externalsecret $es -n $ns force-sync=$(date +%s) --overwrite; done; done
+```
+
+```bash
+oc get externalsecret -n rhbk-dev && oc get applications -n openshift-gitops
+```
+
+ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 
 ## 16. Dépannage
 
