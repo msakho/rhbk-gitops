@@ -18,6 +18,7 @@ overlays/
   prod/ dev/                   Namespace, nom d'instance, hostnames, ressources
     external-secrets/          ExternalSecrets : secrets lus dans Vault via ESO
 custom-rhbk/Containerfile      Image Keycloak optimisée (quay.io/msakho0/mskeycloak)
+tools/postgresql/              Hors ArgoCD : base PostgreSQL d'un environnement (guide, annexe B)
 ```
 
 | | prod | dev |
@@ -56,8 +57,9 @@ Les namespaces, l'opérateur RHBK (un par namespace, canal `stable-v26.6`), Exte
 
 Restent à faire à la main, par environnement :
 
-1. **Base PostgreSQL** : Service `postgres-db` (port 5432), base `rhbk`.
+1. **Certificat** couvrant les hostnames de l'environnement (guide, annexe C).
 2. **Valeurs dans Vault** sous `secret/rhbk/<env>/` : `db`, `bootstrap-admin`, `tls` (guide, annexe A.7).
+3. **Base PostgreSQL** `postgres-db` : manifestes `tools/postgresql/`, identifiants lus dans Vault (guide, annexe B).
 
 ## Secrets
 

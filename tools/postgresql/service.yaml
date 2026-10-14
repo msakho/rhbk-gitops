@@ -1,0 +1,16 @@
+# Keycloak connects to "postgres-db:5432" (db.host in base/keycloak/keycloak.yaml).
+# The selector must match the pod labels of deployment.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-db
+  labels:
+    app: postgresql-db
+spec:
+  selector:
+    app: postgresql-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

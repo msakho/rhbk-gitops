@@ -7,8 +7,8 @@ pour deux environnements : **prod** et **dev**.
 Il couvre **uniquement la partie applicative**. Les namespaces, l'opérateur RHBK,
 External Secrets Operator (ESO) et Vault sont gérés par les administrateurs dans un
 second dépôt GitOps, [`rhbk-platform`](https://github.com/msakho/rhbk-platform), décrit dans son README et dans
-l'annexe A (section 17). La base PostgreSQL est créée à la main. Tout cela forme les
-prérequis de la section 2.
+l'annexe A (section 17). La base PostgreSQL (annexe B) et le certificat (annexe C)
+sont créés à la main. Tout cela forme les prérequis de la section 2.
 
 | Dépôt | Contenu | Droits ArgoCD |
 |---|---|---|
@@ -39,6 +39,8 @@ En suivant ce guide dans un dépôt vide, on obtient exactement le dépôt
 15. [Exploitation courante](#15-exploitation-courante)
 16. [Dépannage](#16-dépannage)
 17. [Annexe A : plateforme (dépôt rhbk-platform) et Vault](#17-annexe-a--plateforme-dépôt-rhbk-platform-et-vault)
+18. [Annexe B : créer la base PostgreSQL d'un environnement](#18-annexe-b--créer-la-base-postgresql-dun-environnement)
+19. [Annexe C : générer le certificat d'un environnement](#19-annexe-c--générer-le-certificat-dun-environnement)
 
 ---
 
@@ -126,7 +128,7 @@ Ces éléments **ne sont pas gérés par le dépôt**. Vérifie-les avant de com
 | 2 | OpenShift GitOps installé, instance `openshift-gitops` | `oc get argocd -n openshift-gitops` |
 | 3 | Namespaces `rhbk` et `rhbk-dev` (créés par `rhbk-platform`) | `oc get ns rhbk rhbk-dev` |
 | 4 | Opérateur RHBK installé **dans chaque namespace** par `rhbk-platform` (canal `stable-v26.6`). Il ne supporte que OwnNamespace/SingleNamespace. | `oc get csv -n rhbk-dev \| grep rhbk` → `Succeeded` |
-| 5 | PostgreSQL dans chaque namespace : Service **`postgres-db`** port 5432, base **`rhbk`** | `oc get svc postgres-db -n rhbk-dev` |
+| 5 | PostgreSQL dans chaque namespace : Service **`postgres-db`** port 5432, base **`rhbk`** (annexe B) | `oc get svc postgres-db -n rhbk-dev` |
 | 6 | External Secrets Operator démarré et `ClusterSecretStore vault-store` valide (`rhbk-platform`, annexe A) | `oc get clustersecretstore vault-store` → `Valid`, `READY True` |
 | 7 | Valeurs rangées dans Vault pour l'environnement : `secret/rhbk/<env>/db` (`username`, `password`), `secret/rhbk/<env>/bootstrap-admin` (`username`, `password`), `secret/rhbk/<env>/tls` (`tls.crt` = fullchain, `tls.key`) | `oc exec -n vault vault-0 -- vault kv list -mount=secret rhbk/dev` (avec un token, voir annexe A.5) |
 | 8 | Certificat (`tls.crt`) couvrant les hostnames public et admin de l'environnement | voir ci-dessous |
@@ -199,7 +201,7 @@ mkdir -p ~/rhbk-gitops-v2 && cd ~/rhbk-gitops-v2
 ```
 
 ```bash
-mkdir -p bootstrap argocd/applications base/keycloak overlays/prod/external-secrets overlays/dev/external-secrets custom-rhbk docs
+mkdir -p bootstrap argocd/applications base/keycloak overlays/prod/external-secrets overlays/dev/external-secrets custom-rhbk docs tools/postgresql
 ```
 
 Arborescence cible :
@@ -237,6 +239,8 @@ overlays/
     (mêmes fichiers que prod)
 custom-rhbk/
   Containerfile
+tools/
+  postgresql/                hors ArgoCD : base d'un environnement (annexe B)
 docs/
   deploiement-gitops.md
 ```
@@ -1276,11 +1280,13 @@ Les prérequis de la section 2, dans le namespace `rhbk-qualif` :
 
 1. Namespace `rhbk-qualif` et opérateur RHBK : dans `rhbk-platform` (README,
    « Ajouter un environnement »), à synchroniser **avant** l'étape 15.3.6.
-2. Base PostgreSQL `postgres-db` (base `rhbk`).
+2. **Certificat** pour les hostnames de qualif (annexe C).
 3. **Valeurs dans Vault** sous `secret/rhbk/qualif/` : `db`, `bootstrap-admin` et
    `tls` (voir annexe A.7). Les ExternalSecrets de l'overlay les liront après la
    commande `sed` de l'étape 15.3.2. Aucun Secret n'est à créer à la main.
-4. **Certificat** : le certificat existant ne couvre que les hostnames prod et
+4. **Base PostgreSQL** `postgres-db` (annexe B), une fois le namespace créé par
+   `rhbk-platform` et les valeurs rangées dans Vault.
+5. **Vérifier le certificat** : le certificat existant ne couvre que les hostnames prod et
    dev. Le `tls.crt` rangé dans `secret/rhbk/qualif/tls` doit avoir un SAN contenant
    `qualif-rhbk.<domaine>` et `qualif-rhbk-admin.<domaine>`. Vérification sur le
    fichier avant de le ranger :
@@ -1697,20 +1703,30 @@ oc get clustersecretstore vault-store
 
 ### A.7 Ranger les valeurs d'un environnement dans Vault
 
-Pour un nouvel environnement, avec les fichiers locaux (exemple pour dev). Les
+Depuis le dossier de `rhbk-platform` (où se trouve `vault-init.json`), en indiquant
+l'environnement et les fichiers du certificat de cet environnement (annexe C). Les
 valeurs passent par l'entrée standard et un fichier temporaire supprimé aussitôt :
 
 ```bash
-ENV=dev
+cd /usr/local/dev/rhbk-platform
+```
+
+```bash
+ENV=qualif
+CERT=/usr/local/dev/rhbk-gitops/cert/$ENV-rhbk.fullchain.pem
+KEY=/usr/local/dev/rhbk-gitops/cert/$ENV-rhbk.key.pem
+```
+
+```bash
 python3 -c "$(cat <<'EOF'
 import json, sys, getpass
-env = sys.argv[1]
+env, cert, key = sys.argv[1:4]
 ask = getpass.getpass  # prompts on the terminal (not on stdout), input not echoed
 tok = json.load(open("vault-init.json"))["root_token"]
 items = {
   f"rhbk/{env}/db": {"username": ask("db username: "), "password": ask("db password: ")},
   f"rhbk/{env}/bootstrap-admin": {"username": ask("admin username: "), "password": ask("admin password: ")},
-  f"rhbk/{env}/tls": {"tls.crt": open("cert/rhbk.fullchain.pem").read(), "tls.key": open("cert/rhbk.key.pem").read()},
+  f"rhbk/{env}/tls": {"tls.crt": open(cert).read(), "tls.key": open(key).read()},
 }
 print("set -e"); print(f"export VAULT_TOKEN={json.dumps(tok)}"); print("umask 077")
 for path, data in items.items():
@@ -1718,14 +1734,19 @@ for path, data in items.items():
     print(f"vault kv put -mount=secret {path} @/tmp/v.json >/dev/null && echo 'written {path}'")
 print("rm -f /tmp/v.json")
 EOF
-)" "$ENV" | oc exec -i -n vault vault-0 -- sh -s
+)" "$ENV" "$CERT" "$KEY" | oc exec -i -n vault vault-0 -- sh -s
 ```
 
 Les questions (`db username:`…) s'affichent dans le terminal ; rien n'est affiché à
 la saisie, ni les noms d'utilisateur ni les mots de passe. Le script est passé à
 `python3 -c` pour que la saisie reste sur le terminal ; seules les commandes `vault`
-partent vers le pod. Les identifiants de la base doivent être ceux de la
-base PostgreSQL de l'environnement.
+partent vers le pod.
+
+- **Base** : pour un nouvel environnement, choisis librement l'utilisateur et le mot
+  de passe : la base de l'annexe B est créée **avec** ces valeurs (même chemin Vault).
+  Pour un environnement existant, ce sont les identifiants de sa base actuelle.
+- **Admin** : utilisateur temporaire du premier démarrage de Keycloak (à remplacer
+  par un admin permanent après le premier login).
 
 Vérifier les clés (sans les valeurs) :
 
@@ -1753,4 +1774,278 @@ oc get secret rhbk-db-secret -n rhbk-dev -o jsonpath='{.metadata.ownerReferences
 ```
 
 Résultat attendu : `ExternalSecret/rhbk-db-secret`.
+
+---
+
+## 18. Annexe B : créer la base PostgreSQL d'un environnement
+
+La base n'est pas gérée par ArgoCD. Les manifestes sont dans `tools/postgresql/` et
+s'appliquent à la main, une fois par environnement. Ils reprennent les réglages de la
+base de prod (image Red Hat PostgreSQL 15, volume de 1 Gi), avec une différence : le
+Secret de la base (`postgres-db`) est **créé par ESO depuis Vault**, au même chemin
+que `rhbk-db-secret` (`secret/rhbk/<env>/db`). La base et Keycloak utilisent donc les
+mêmes identifiants, sans mot de passe à saisir.
+
+| Fichier | Contenu |
+|---|---|
+| `externalsecret.yaml` | Secret `postgres-db` (`database-user`, `database-password`, `database-name: rhbk`) depuis Vault |
+| `pvc.yaml` | volume de 1 Gi (`ocs-storagecluster-ceph-rbd`) |
+| `deployment.yaml` | PostgreSQL 15, stratégie `Recreate` |
+| `service.yaml` | `postgres-db:5432`, sélecteur `app: postgresql-db` |
+
+Pièges évités par rapport au template OpenShift `postgresql-persistent` : il crée un
+DeploymentConfig (déprécié) et un Service dont le sélecteur (`name: postgres-db`) ne
+correspond pas aux pods une fois remplacé par un Deployment, ce qui donne
+`connection refused`.
+
+### B.1 Prérequis
+
+1. Le namespace existe (créé par `rhbk-platform`).
+2. Les valeurs `secret/rhbk/<env>/db` sont dans Vault (annexe A.7).
+
+### B.2 Les manifestes
+
+`tools/postgresql/externalsecret.yaml`
+```yaml
+# Database credentials for the PostgreSQL pod, read from the same Vault path as the Keycloak
+# ExternalSecret rhbk-db-secret (secret/rhbk/<env>/db): one source for both sides.
+# __ENV__ is replaced at apply time (see docs/deploiement-gitops.md, annex B).
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-db
+  labels:
+    app: postgresql-db
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: vault-store
+  target:
+    name: postgres-db
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    template:
+      engineVersion: v2
+      mergePolicy: Replace
+      data:
+        database-name: rhbk
+        database-user: "{{ .username }}"
+        database-password: "{{ .password }}"
+  dataFrom:
+    - extract:
+        key: rhbk/__ENV__/db
+```
+
+`tools/postgresql/pvc.yaml`
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-db
+  labels:
+    app: postgresql-db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ocs-storagecluster-ceph-rbd
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+`tools/postgresql/deployment.yaml`
+```yaml
+# Same settings as the prod database (Red Hat PostgreSQL 15 image).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-db
+  labels:
+    app: postgresql-db
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # RWO volume: never two pods at the same time
+  selector:
+    matchLabels:
+      app: postgresql-db
+  template:
+    metadata:
+      labels:
+        app: postgresql-db
+    spec:
+      containers:
+        - name: postgresql
+          image: registry.redhat.io/rhel8/postgresql-15
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-db
+                  key: database-user
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-db
+                  key: database-password
+            - name: POSTGRESQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-db
+                  key: database-name
+          resources:
+            limits:
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/usr/libexec/check-container"]
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+          livenessProbe:
+            exec:
+              command: ["/usr/libexec/check-container", "--live"]
+            initialDelaySeconds: 120
+            timeoutSeconds: 10
+          volumeMounts:
+            - name: postgres-db-data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: postgres-db-data
+          persistentVolumeClaim:
+            claimName: postgres-db
+```
+
+`tools/postgresql/service.yaml`
+```yaml
+# Keycloak connects to "postgres-db:5432" (db.host in base/keycloak/keycloak.yaml).
+# The selector must match the pod labels of deployment.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-db
+  labels:
+    app: postgresql-db
+spec:
+  selector:
+    app: postgresql-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+```
+
+### B.3 Créer la base
+
+Depuis le dossier de `rhbk-gitops`. `__ENV__` est remplacé par le nom de
+l'environnement ; le `---` sépare les documents YAML :
+
+```bash
+ENV=qualif
+for f in tools/postgresql/*.yaml; do sed "s/__ENV__/$ENV/g" "$f"; echo '---'; done | oc apply -n rhbk-$ENV -f -
+```
+
+### B.4 Vérifier
+
+```bash
+oc get externalsecret postgres-db -n rhbk-$ENV
+```
+
+`SecretSynced`.
+
+```bash
+oc rollout status deploy/postgres-db -n rhbk-$ENV
+```
+
+Connexion par le Service, comme Keycloak (n'affiche aucune valeur) :
+
+```bash
+oc exec -n rhbk-$ENV deploy/postgres-db -- bash -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -h postgres-db -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -tAc "select 1"' >/dev/null && echo "connexion OK"
+```
+
+---
+
+## 19. Annexe C : générer le certificat d'un environnement
+
+Les routes présentent un certificat Let's Encrypt, obtenu avec
+[acme.sh](https://github.com/acmesh-official/acme.sh) et un challenge DNS sur AWS
+Route 53 (le domaine `apps.<cluster>` est dans une zone Route 53 du sandbox). On génère
+**un certificat par environnement**, pour ses deux hostnames : pas besoin de
+régénérer celui des autres environnements.
+
+Les certificats Let's Encrypt durent **90 jours**. cert-manager pourra automatiser le
+renouvellement plus tard ; en attendant, refaire cette annexe avant l'expiration.
+
+### C.1 Prérequis
+
+- acme.sh récupéré dans `cert/acme.sh` (dossier ignoré par git) :
+  ```bash
+  git clone https://github.com/acmesh-official/acme.sh.git /usr/local/dev/rhbk-gitops/cert/acme.sh
+  ```
+- Une clé AWS avec les droits Route 53 sur la zone du cluster.
+
+### C.2 Identifiants AWS
+
+Saisis sans affichage, gardés dans le terminal uniquement (jamais dans un fichier du
+dépôt) :
+
+```bash
+read -r "AWS_ACCESS_KEY_ID?AWS access key id: " && read -rs "AWS_SECRET_ACCESS_KEY?AWS secret access key: " && echo && export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DNS_SLOWRATE=1
+```
+
+(Syntaxe zsh, le shell par défaut de macOS. En bash : `read -rp "..." AWS_ACCESS_KEY_ID`
+et `read -rsp "..." AWS_SECRET_ACCESS_KEY`.)
+
+### C.3 Demander le certificat
+
+```bash
+ENV=qualif
+DOMAIN=apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+cd /usr/local/dev/rhbk-gitops/cert/acme.sh
+```
+
+```bash
+./acme.sh --issue --server letsencrypt --keylength 4096 --accountemail <ton-email> --dns dns_aws -d $ENV-rhbk.$DOMAIN -d $ENV-rhbk-admin.$DOMAIN
+```
+
+La validation DNS prend une à deux minutes.
+
+### C.4 Copier le certificat et la clé
+
+Dans `cert/`, ignoré par git, avec les noms attendus par l'annexe A.7 :
+
+```bash
+./acme.sh --install-cert -d $ENV-rhbk.$DOMAIN --fullchain-file ../$ENV-rhbk.fullchain.pem --key-file ../$ENV-rhbk.key.pem
+```
+
+```bash
+chmod 600 ../$ENV-rhbk.key.pem
+```
+
+### C.5 Vérifier
+
+Les deux hostnames de l'environnement et la date d'expiration :
+
+```bash
+openssl x509 -in ../$ENV-rhbk.fullchain.pem -noout -text | grep -E 'DNS:|Not After'
+```
+
+Puis ranger le certificat dans Vault (annexe A.7, chemin `secret/rhbk/$ENV/tls`).
+
+### C.6 Renouveler
+
+Même commande qu'en C.3 avec `--renew` à la place de `--issue` (ou `--force` pour
+renouveler avant la date prévue), puis C.4, puis remettre `tls` dans Vault (annexe A.7,
+section `tls` seulement, ou l'interface web) : ESO met `rhbk-tls-secret` à jour et le
+routeur prend le nouveau certificat sans redémarrage.
+
+```bash
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+```
+
+À lancer quand tu as fini, pour retirer la clé AWS du terminal.
 

@@ -1,0 +1,61 @@
+# Same settings as the prod database (Red Hat PostgreSQL 15 image).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-db
+  labels:
+    app: postgresql-db
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # RWO volume: never two pods at the same time
+  selector:
+    matchLabels:
+      app: postgresql-db
+  template:
+    metadata:
+      labels:
+        app: postgresql-db
+    spec:
+      containers:
+        - name: postgresql
+          image: registry.redhat.io/rhel8/postgresql-15
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-db
+                  key: database-user
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-db
+                  key: database-password
+            - name: POSTGRESQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-db
+                  key: database-name
+          resources:
+            limits:
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/usr/libexec/check-container"]
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+          livenessProbe:
+            exec:
+              command: ["/usr/libexec/check-container", "--live"]
+            initialDelaySeconds: 120
+            timeoutSeconds: 10
+          volumeMounts:
+            - name: postgres-db-data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: postgres-db-data
+          persistentVolumeClaim:
+            claimName: postgres-db
