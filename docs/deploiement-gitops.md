@@ -1218,9 +1218,15 @@ annotation n'est pas remplacée par une synchro.
 
 Pour garder les deux déploiements, utilise d'autres namespaces (par exemple
 `rhbk2` et `rhbk2-dev`), d'autres hostnames, d'autres noms d'Applications
-(`rhbk2-root`…) et un autre nom d'AppProject. Les prérequis de la section 2
-(opérateur, base, secrets, certificat couvrant les nouveaux hostnames) doivent alors
-être réunis dans ces nouveaux namespaces.
+(`rhbk2-root`…) et un autre nom d'AppProject. Les prérequis de la section 2 doivent
+alors être réunis pour ces nouveaux namespaces :
+
+- dans `rhbk-platform` : un overlay `operators/rhbk/overlays/<env>` et une Application
+  par namespace (namespace + opérateur), et les namespaces ajoutés aux `destinations`
+  de l'AppProject `platform` (voir son README, « Ajouter un environnement ») ;
+- à la main : la base PostgreSQL ;
+- dans Vault : les valeurs sous `secret/rhbk/<env>/...`, avec un certificat couvrant
+  les nouveaux hostnames (annexe A.7).
 
 ---
 
@@ -1551,7 +1557,7 @@ ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 | `rhbk-prod` reste `OutOfSync` | Normal : synchro manuelle | Relire le diff, puis **Sync**. |
 | Les ExternalSecrets restent `OutOfSync` dans ArgoCD alors qu'ils sont `SecretSynced` | Les valeurs par défaut ajoutées par le webhook d'ESO ne sont pas dans git | Les déclarer explicitement (section 7) ; comparer avec `oc get externalsecret <nom> -n <ns> -o yaml`. |
 | ExternalSecret en `SecretSyncedError`, message `ClusterSecretStore "vault-store" is not ready` | Le store n'est pas valide | `oc get clustersecretstore vault-store -o yaml` : voir les lignes suivantes. |
-| Store invalide : `unable to log in with Kubernetes auth: context deadline exceeded` | Les pods ESO sont isolés par des NetworkPolicies deny-all : la sortie vers Vault n'est pas ouverte | Ajouter la règle d'egress dans `ExternalSecretsConfig` (annexe A.2), jamais une NetworkPolicy à la main. |
+| Store invalide : `unable to log in with Kubernetes auth: context deadline exceeded` | Les pods ESO sont isolés par des NetworkPolicies deny-all : la sortie vers Vault n'est pas ouverte | Dans `rhbk-platform`, ajouter la règle d'egress dans `eso/externalsecretsconfig.yaml` (`spec.controllerConfig.networkPolicies`, annexe A.2), puis synchroniser `eso-config`. Jamais de NetworkPolicy à la main. |
 | Store invalide : `Vault is sealed` / code 503 | Vault redémarré et scellé | Desceller (section 15.5). |
 | Store invalide : `permission denied` / 403 | Rôle ou politique Vault incorrects | Vérifier le rôle `external-secrets` et la politique `rhbk-read` (annexe A.5). |
 | ExternalSecret `SecretSyncedError` : `cannot find secret data for key` | Chemin ou propriété absents dans Vault | `vault kv get -mount=secret rhbk/<env>/<chemin>` ; vérifier les noms des propriétés. |
