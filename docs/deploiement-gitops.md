@@ -1527,8 +1527,10 @@ où se trouve `vault-init.json` :
 cd /usr/local/dev/rhbk-platform && oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
 ```
 
-**Vérifier le retour à la normale** (environ 20 secondes pour le store, puis les
-ExternalSecrets à leur prochaine lecture) :
+**Vérifier le retour à la normale.** Compter **5 à 10 minutes** après le descellement
+avant de conclure : le store redevient valide en une vingtaine de secondes, mais les
+ExternalSecrets et ArgoCD peuvent mettre plus longtemps (voir « Constaté après un vrai
+redémarrage » ci-dessous).
 
 ```bash
 oc get clustersecretstore vault-store
@@ -1548,6 +1550,13 @@ oc get externalsecret -n rhbk-dev && oc get applications -n openshift-gitops
 
 ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 
+**Constaté après un vrai redémarrage du cluster** (en plus du descellement) :
+
+| Symptôme | Cause | Que faire |
+|---|---|---|
+| Un ExternalSecret reste en `SecretSyncedError` (`could not get secret data from provider`) alors que `vault-store` est `Valid` ; l'Application correspondante est `Degraded` | Pendant que Vault était scellé, ESO a échoué plusieurs fois sur ce secret et **espace ses nouvelles tentatives** (délai croissant) : il n'a pas encore réessayé depuis le descellement. Keycloak n'est pas affecté (le Secret existant est conservé). | Forcer la relecture avec la boucle `force-sync` ci-dessus. |
+| Une ou plusieurs Applications en `Unknown`, message `ComparisonError … unable to resolve parseableType for GroupVersionKind: route.openshift.io/v1, Kind=Route` | Les serveurs d'API redémarrent avec le cluster et ne publient pas tout de suite le schéma complet des Routes : ArgoCD ne peut pas calculer l'écart des Applications qui contiennent des Routes. Aucun impact sur ce qui tourne. | **Attendre quelques minutes**, puis une relecture (`oc annotate application <nom> -n openshift-gitops argocd.argoproj.io/refresh=hard --overwrite`). Redémarrer le contrôleur ArgoCD n'est pas nécessaire. |
+
 ## 16. Dépannage
 
 | Symptôme | Cause | Solution |
@@ -1561,6 +1570,8 @@ ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 | `/admin` répond 200 sur le hostname public | Une ancienne route passthrough ou l'Ingress de l'opérateur existe encore | `oc get route,ingress -n <ns>` ; supprimer la route en trop, vérifier `ingress.enabled: false`. |
 | Keycloak : `build time options differ` ou démarrage lent avec un rebuild | Options de build de l'image différentes du CR | Aligner le Containerfile et le CR, rebuilder, mettre à jour le digest. |
 | `rhbk-prod` reste `OutOfSync` | Normal : synchro manuelle | Relire le diff, puis **Sync**. |
+| Juste après un redémarrage du cluster : Applications en `Unknown`, `unable to resolve parseableType … Kind=Route` | Schéma des Routes pas encore publié par les serveurs d'API | Attendre quelques minutes puis relire l'Application (section 15.5). |
+| Après un descellement de Vault : un ExternalSecret reste en `SecretSyncedError` alors que le store est `Valid` | ESO espace ses nouvelles tentatives après plusieurs échecs | Forcer la relecture (`force-sync`, section 15.5). |
 | Les ExternalSecrets restent `OutOfSync` dans ArgoCD alors qu'ils sont `SecretSynced` | Les valeurs par défaut ajoutées par le webhook d'ESO ne sont pas dans git | Les déclarer explicitement (section 7) ; comparer avec `oc get externalsecret <nom> -n <ns> -o yaml`. |
 | ExternalSecret en `SecretSyncedError`, message `ClusterSecretStore "vault-store" is not ready` | Le store n'est pas valide | `oc get clustersecretstore vault-store -o yaml` : voir les lignes suivantes. |
 | Store invalide : `unable to log in with Kubernetes auth: context deadline exceeded` | Les pods ESO sont isolés par des NetworkPolicies deny-all : la sortie vers Vault n'est pas ouverte | Dans `rhbk-platform`, ajouter la règle d'egress dans `eso/externalsecretsconfig.yaml` (`spec.controllerConfig.networkPolicies`, annexe A.2), puis synchroniser `eso-config`. Jamais de NetworkPolicy à la main. |
