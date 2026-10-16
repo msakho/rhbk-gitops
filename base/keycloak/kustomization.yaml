@@ -5,3 +5,4 @@ resources:
   - router-secret-reader-rbac.yaml
   - keycloak.yaml
   - routes.yaml
+  - prometheusrule.yaml

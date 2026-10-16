@@ -1,0 +1,81 @@
+# Keycloak alerts, deployed in each environment namespace. Evaluated by the user workload
+# Thanos Ruler: rules only see the series of their own namespace (Keycloak metrics scraped by the
+# operator ServiceMonitor, and kube-state-metrics series for pods of the namespace).
+# Health endpoints and /metrics are excluded from the HTTP indicators.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: keycloak-alerts
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  groups:
+    - name: keycloak
+      rules:
+        - alert: KeycloakNotReady
+          expr: sum(kube_pod_status_ready{pod=~"rhbk-[a-z]+-[0-9]+", condition="true"}) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No Keycloak pod is ready in {{ $labels.namespace }}"
+            description: "Check the pod (oc get pods), the database and the Keycloak CR status."
+        - alert: KeycloakMetricsTargetDown
+          expr: up{endpoint="management", service=~".+-service"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak metrics endpoint is down ({{ $labels.pod }})"
+            description: "Prometheus cannot scrape the management port (9000)."
+        - alert: KeycloakFrequentRestarts
+          expr: increase(kube_pod_container_status_restarts_total{container="keycloak"}[1h]) > 2
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak pod {{ $labels.pod }} restarted {{ $value | humanize }} times in 1h"
+            description: "Often the database not being ready (after a cluster restart) or a memory limit."
+        - alert: KeycloakHighServerErrorRate
+          expr: |
+            sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR", uri!~"/health.*|/metrics"}[5m]))
+              / sum(rate(http_server_requests_seconds_count{uri!~"/health.*|/metrics"}[5m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More than 5% of Keycloak requests fail with a 5xx error"
+            description: "Current ratio: {{ $value | humanizePercentage }}."
+        - alert: KeycloakSlowResponses
+          expr: |
+            sum(rate(http_server_requests_seconds_sum{uri!~"/health.*|/metrics"}[5m]))
+              / sum(rate(http_server_requests_seconds_count{uri!~"/health.*|/metrics"}[5m])) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak average response time is above 1s"
+            description: "Current average: {{ $value | humanizeDuration }}."
+        - alert: KeycloakDatabasePoolExhausted
+          expr: max(agroal_awaiting_count) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak requests are waiting for a database connection"
+            description: "The connection pool (db.poolMaxSize) is saturated or the database is slow."
+        - alert: KeycloakHeapUsageHigh
+          expr: sum(jvm_memory_used_bytes{area="heap"}) / sum(jvm_memory_max_bytes{area="heap"} > 0) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak heap usage above 90%"
+            description: "Current usage: {{ $value | humanizePercentage }}. Consider raising the memory limit."
+        - alert: PostgresNotReady
+          expr: sum(kube_pod_status_ready{pod=~"postgres-db-.+", condition="true"}) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "The PostgreSQL pod is not ready in {{ $labels.namespace }}"
+            description: "Keycloak cannot work without its database (postgres-db)."
