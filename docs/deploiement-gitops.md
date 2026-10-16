@@ -83,6 +83,7 @@ Kustomize assemble base + overlay au moment où ArgoCD lit le dépôt.
 | `Route rhbk-public-realms` | Hostname public, chemin `/realms` uniquement. |
 | `Route rhbk-public-resources` | Hostname public, chemin `/resources` uniquement. |
 | `Route rhbk-admin` | Hostname admin, tous les chemins (console). |
+| `PrometheusRule keycloak-alerts` | Alertes Keycloak et PostgreSQL de l'environnement (section 5.6). |
 
 ### 1.4 Isolation de la console admin
 
@@ -135,6 +136,7 @@ Ces éléments **ne sont pas gérés par le dépôt**. Vérifie-les avant de com
 | 9 | Image Keycloak optimisée publiée (voir `custom-rhbk/Containerfile`), avec `KC_DB=postgres`, `KC_HEALTH_ENABLED=true`, `KC_METRICS_ENABLED=true` | `oc image info <image>` |
 | 10 | ArgoCD a les droits sur les namespaces cibles | `oc auth can-i create keycloaks.k8s.keycloak.org -n rhbk-dev --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller` → `yes` |
 | 11 | Outils locaux : `oc` (même version que le cluster), `git`, accès en écriture au dépôt GitHub | `oc version`, `git --version` |
+| 12 | Surveillance des projets utilisateur activée (`rhbk-platform`, Application `platform-monitoring`) | `oc get pods -n openshift-user-workload-monitoring` : `prometheus-user-workload-*` et `thanos-ruler-user-workload-*` en `Running` |
 
 Pour vérifier le certificat (prérequis 8), sur le fichier avant de le ranger dans
 Vault :
@@ -224,6 +226,7 @@ base/
     router-secret-reader-rbac.yaml
     keycloak.yaml
     routes.yaml
+    prometheusrule.yaml
 overlays/
   prod/
     kustomization.yaml
@@ -277,6 +280,7 @@ resources:
   - router-secret-reader-rbac.yaml
   - keycloak.yaml
   - routes.yaml
+  - prometheusrule.yaml
 ```
 
 ### 5.2 `base/keycloak/internal-svc.yaml`
@@ -512,6 +516,110 @@ Pour restreindre l'accès à la console à certaines adresses IP, décommente
 l'annotation `ip_whitelist` (adresses ou CIDR séparés par des espaces).
 
 ---
+
+### 5.6 `base/keycloak/prometheusrule.yaml`
+
+Alertes déployées dans chaque environnement. Elles sont évaluées par le Thanos Ruler
+de la **surveillance des projets utilisateur**, activée par l'Application
+`platform-monitoring` de `rhbk-platform` (prérequis 12). Une règle ne voit que les
+séries de son namespace : les métriques Keycloak (collectées par le ServiceMonitor que
+crée l'opérateur, port de gestion 9000) et les métriques de pods du namespace
+(`kube_pod_status_ready`, `kube_pod_container_status_restarts_total`).
+
+| Alerte | Déclenchement | Sévérité |
+|---|---|---|
+| `KeycloakNotReady` | aucun pod Keycloak prêt depuis 5 min | critical |
+| `PostgresNotReady` | pod PostgreSQL non prêt depuis 5 min | critical |
+| `KeycloakMetricsTargetDown` | port de métriques injoignable depuis 5 min | warning |
+| `KeycloakFrequentRestarts` | plus de 2 redémarrages en 1 h | warning |
+| `KeycloakHighServerErrorRate` | plus de 5 % de réponses 5xx pendant 10 min (hors `/health`, `/metrics`) | warning |
+| `KeycloakSlowResponses` | temps de réponse moyen supérieur à 1 s pendant 10 min | warning |
+| `KeycloakDatabasePoolExhausted` | requêtes en attente d'une connexion à la base depuis 5 min | warning |
+| `KeycloakHeapUsageHigh` | mémoire JVM (heap) au-delà de 90 % pendant 15 min | warning |
+
+```yaml
+# Keycloak alerts, deployed in each environment namespace. Evaluated by the user workload
+# Thanos Ruler: rules only see the series of their own namespace (Keycloak metrics scraped by the
+# operator ServiceMonitor, and kube-state-metrics series for pods of the namespace).
+# Health endpoints and /metrics are excluded from the HTTP indicators.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: keycloak-alerts
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  groups:
+    - name: keycloak
+      rules:
+        - alert: KeycloakNotReady
+          expr: sum(kube_pod_status_ready{pod=~"rhbk-[a-z]+-[0-9]+", condition="true"}) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No Keycloak pod is ready in {{ $labels.namespace }}"
+            description: "Check the pod (oc get pods), the database and the Keycloak CR status."
+        - alert: KeycloakMetricsTargetDown
+          expr: up{endpoint="management", service=~".+-service"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak metrics endpoint is down ({{ $labels.pod }})"
+            description: "Prometheus cannot scrape the management port (9000)."
+        - alert: KeycloakFrequentRestarts
+          expr: increase(kube_pod_container_status_restarts_total{container="keycloak"}[1h]) > 2
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak pod {{ $labels.pod }} restarted {{ $value | humanize }} times in 1h"
+            description: "Often the database not being ready (after a cluster restart) or a memory limit."
+        - alert: KeycloakHighServerErrorRate
+          expr: |
+            sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR", uri!~"/health.*|/metrics"}[5m]))
+              / sum(rate(http_server_requests_seconds_count{uri!~"/health.*|/metrics"}[5m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More than 5% of Keycloak requests fail with a 5xx error"
+            description: "Current ratio: {{ $value | humanizePercentage }}."
+        - alert: KeycloakSlowResponses
+          expr: |
+            sum(rate(http_server_requests_seconds_sum{uri!~"/health.*|/metrics"}[5m]))
+              / sum(rate(http_server_requests_seconds_count{uri!~"/health.*|/metrics"}[5m])) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak average response time is above 1s"
+            description: "Current average: {{ $value | humanizeDuration }}."
+        - alert: KeycloakDatabasePoolExhausted
+          expr: max(agroal_awaiting_count) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak requests are waiting for a database connection"
+            description: "The connection pool (db.poolMaxSize) is saturated or the database is slow."
+        - alert: KeycloakHeapUsageHigh
+          expr: sum(jvm_memory_used_bytes{area="heap"}) / sum(jvm_memory_max_bytes{area="heap"} > 0) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak heap usage above 90%"
+            description: "Current usage: {{ $value | humanizePercentage }}. Consider raising the memory limit."
+        - alert: PostgresNotReady
+          expr: sum(kube_pod_status_ready{pod=~"postgres-db-.+", condition="true"}) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "The PostgreSQL pod is not ready in {{ $labels.namespace }}"
+            description: "Keycloak cannot work without its database (postgres-db)."
+```
 
 ## 6. Les overlays prod et dev
 
@@ -1556,6 +1664,28 @@ ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 |---|---|---|
 | Un ExternalSecret reste en `SecretSyncedError` (`could not get secret data from provider`) alors que `vault-store` est `Valid` ; l'Application correspondante est `Degraded` | Pendant que Vault était scellé, ESO a échoué plusieurs fois sur ce secret et **espace ses nouvelles tentatives** (délai croissant) : il n'a pas encore réessayé depuis le descellement. Keycloak n'est pas affecté (le Secret existant est conservé). | Forcer la relecture avec la boucle `force-sync` ci-dessus. |
 | Une ou plusieurs Applications en `Unknown`, message `ComparisonError … unable to resolve parseableType for GroupVersionKind: route.openshift.io/v1, Kind=Route` | Les serveurs d'API redémarrent avec le cluster et ne publient pas tout de suite le schéma complet des Routes : ArgoCD ne peut pas calculer l'écart des Applications qui contiennent des Routes. Aucun impact sur ce qui tourne. | **Attendre quelques minutes**, puis une relecture (`oc annotate application <nom> -n openshift-gitops argocd.argoproj.io/refresh=hard --overwrite`). Redémarrer le contrôleur ArgoCD n'est pas nécessaire. |
+
+### 15.6 Alertes
+
+**Où les voir** : console OpenShift, **Observe → Alerting** (filtrer sur le namespace),
+ou **Observe → Metrics** pour interroger les métriques (par exemple
+`agroal_active_count`, `http_server_requests_seconds_count`).
+
+| Origine | Alertes | Défini dans |
+|---|---|---|
+| Keycloak et PostgreSQL, par environnement | section 5.6 | `rhbk-gitops`, `base/keycloak/prometheusrule.yaml` |
+| ESO | `ExternalSecretNotSynced` (15 min), `ClusterSecretStoreNotReady` | `rhbk-platform`, `monitoring/` |
+| Vault | `VaultSealedOrDown` : Vault scellé ou arrêté depuis 5 min (pod non prêt) | `rhbk-platform`, `monitoring/` |
+| ArgoCD | `ArgoCDApplicationUnhealthy` (Degraded / Missing / Unknown depuis 15 min) ; `ArgoCDSyncAlert` (OutOfSync, fournie par l'opérateur GitOps) | `rhbk-platform`, `monitoring/` |
+
+Après un redémarrage du cluster, `VaultSealedOrDown` signale qu'il faut desceller, et
+`ExternalSecretNotSynced` qu'il faut forcer la relecture (section 15.5).
+
+**Pas encore de notification** : les alertes sont visibles dans la console, mais aucun
+destinataire (e-mail, Slack…) n'est configuré dans Alertmanager.
+
+**Non couvert** : l'expiration du certificat (il faudrait un sondeur *blackbox* ;
+cert-manager fournira cette métrique).
 
 ## 16. Dépannage
 
