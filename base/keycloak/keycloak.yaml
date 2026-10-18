@@ -12,8 +12,8 @@ spec:
   instances: 1
   # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
   # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
-  # features=user-event-metrics.
-  image: quay.io/msakho0/mskeycloak:26.6@sha256:62baa396ece967e87737d2f0b0afac98cd9d93516d06618caa50f0cf4520e64e
+  # features=user-event-metrics, event-metrics-user-enabled.
+  image: quay.io/msakho0/mskeycloak:26.6@sha256:9de7d1fcf003404c6acaaeae68406796a2b35b9f7d7e470afa85d2c6f1a6fd55
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true
   # Must match the features baked in the image (custom-rhbk/Containerfile, KC_FEATURES).
