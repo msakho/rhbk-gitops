@@ -1681,6 +1681,10 @@ ou **Observe → Metrics** pour interroger les métriques (par exemple
 Après un redémarrage du cluster, `VaultSealedOrDown` signale qu'il faut desceller, et
 `ExternalSecretNotSynced` qu'il faut forcer la relecture (section 15.5).
 
+**Historique** : les métriques sont conservées **7 jours** sur des volumes persistants
+(`rhbk-platform`, `monitoring/user-workload-monitoring-config.yaml`) et survivent aux
+redémarrages du cluster.
+
 **Pas encore de notification** : les alertes sont visibles dans la console, mais aucun
 destinataire (e-mail, Slack…) n'est configuré dans Alertmanager.
 
