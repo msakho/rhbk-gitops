@@ -11,10 +11,15 @@ metadata:
 spec:
   instances: 1
   # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
-  # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled.
-  image: quay.io/msakho0/mskeycloak:26.6@sha256:b5c791e58570953cc45c5dbcbfe930f4b7c4bb81989a99a157f4147e45c13da7
+  # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
+  # features=user-event-metrics.
+  image: quay.io/msakho0/mskeycloak:26.6@sha256:62baa396ece967e87737d2f0b0afac98cd9d93516d06618caa50f0cf4520e64e
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true
+  # Must match the features baked in the image (custom-rhbk/Containerfile, KC_FEATURES).
+  features:
+    enabled:
+      - user-event-metrics
   # Only used on first start (empty database) to create the temporary admin.
   bootstrapAdmin:
     user:
@@ -56,6 +61,12 @@ spec:
     enabled: false
   additionalOptions:
     - name: metrics-enabled
+      value: "true"
+    # Percentiles (p95, p99) of HTTP response times, used by the dashboards.
+    - name: http-metrics-histograms-enabled
+      value: "true"
+    # Logins, login errors, token issuance... per realm (feature user-event-metrics).
+    - name: event-metrics-user-enabled
       value: "true"
   scheduling:
     affinity:
