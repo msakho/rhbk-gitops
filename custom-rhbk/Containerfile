@@ -5,9 +5,11 @@ FROM registry.redhat.io/rhbk/keycloak-rhel9:26.6 AS builder
 ENV KC_DB=postgres
 ENV KC_HEALTH_ENABLED=true
 ENV KC_METRICS_ENABLED=true
-# User event metrics (logins, login errors, token issuance... per realm): build-time feature,
-# enabled at runtime with event-metrics-user-enabled=true in the Keycloak CR.
+# User event metrics (logins, login errors, token issuance... per realm): the feature AND
+# event-metrics-user-enabled are both build-time options (an optimized image refuses to start
+# if the CR asks for a different value). The CR declares the same feature (spec.features).
 ENV KC_FEATURES=user-event-metrics
+ENV KC_EVENT_METRICS_USER_ENABLED=true
 
 WORKDIR /opt/keycloak
 
