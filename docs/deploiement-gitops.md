@@ -1685,11 +1685,171 @@ Après un redémarrage du cluster, `VaultSealedOrDown` signale qu'il faut descel
 (`rhbk-platform`, `monitoring/user-workload-monitoring-config.yaml`) et survivent aux
 redémarrages du cluster.
 
-**Pas encore de notification** : les alertes sont visibles dans la console, mais aucun
-destinataire (e-mail, Slack…) n'est configuré dans Alertmanager.
+**Notifications** : section 15.7.
 
 **Non couvert** : l'expiration du certificat (il faudrait un sondeur *blackbox* ;
 cert-manager fournira cette métrique).
+
+### 15.7 Notifications
+
+Les alertes des projets utilisateur sont envoyées à l'**Alertmanager de la plateforme**
+(`alertmanager-main`, namespace `openshift-monitoring`). Sa configuration est gérée par
+`rhbk-platform` (`monitoring/alertmanager-main.yaml`) : elle garde les destinataires et
+règles d'inhibition par défaut d'OpenShift, et ajoute une route pour nos alertes.
+
+| Alertes | Destinataire |
+|---|---|
+| namespaces `rhbk`, `rhbk-<env>`, `vault`, `external-secrets`, `openshift-gitops` | **`rhbk-team`** (regroupées par namespace et nom d'alerte) |
+| `Watchdog` (alerte permanente de contrôle d'OpenShift) | `Watchdog` (aucun envoi) |
+| autres alertes `critical` du cluster | `Critical` (aucun envoi) |
+| tout le reste | `Default` (aucun envoi) |
+
+Rythme : premier envoi 30 s après le déclenchement (`group_wait`), mises à jour toutes
+les 5 min (`group_interval`), rappel toutes les 12 h tant que l'alerte est active
+(`repeat_interval`), et notification « résolue » à la fin (`send_resolved`).
+
+#### 15.7.1 Aujourd'hui : récepteur de test
+
+`rhbk-team` envoie vers un **webhook de test** dans le cluster (namespace
+`alert-webhook-test`) qui écrit chaque alerte dans ses logs :
+
+```bash
+oc logs -n alert-webhook-test deploy/alert-webhook
+```
+
+Exemple de ligne : `2026-10-18T14:24:41Z FIRING info RHBKNotificationTest ns=rhbk-dev | …`
+
+Vérifier le routage (dans le pod Alertmanager) :
+
+```bash
+oc exec -n openshift-monitoring alertmanager-main-0 -c alertmanager -- amtool config routes show --alertmanager.url=http://localhost:9093
+```
+
+Tester toute la chaîne avec une alerte temporaire toujours vraie (arrive en 1 à 2 minutes,
+puis « RESOLVED » 5 à 10 minutes après la suppression de la règle) :
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: zz-notification-test
+  namespace: rhbk-dev
+spec:
+  groups:
+    - name: zz-test
+      rules:
+        - alert: RHBKNotificationTest
+          expr: vector(1)
+          labels: {severity: info}
+          annotations: {summary: "Test de la chaîne de notification (à ignorer)"}
+EOF
+```
+
+```bash
+oc delete prometheusrule zz-notification-test -n rhbk-dev
+```
+
+#### 15.7.2 Passer à l'e-mail (SMTP)
+
+Le modèle prêt à l'emploi est dans `rhbk-platform` :
+`monitoring/examples/alertmanager-main-smtp.yaml`. C'est un **ExternalSecret** qui génère
+toute la configuration d'Alertmanager (même routage) à partir des paramètres SMTP rangés
+dans Vault : le mot de passe SMTP n'est jamais dans git. Ce modèle a été validé (rendu par
+ESO avec des valeurs factices, puis `amtool check-config`).
+
+**Il te faut** : l'adresse du serveur SMTP et son port (`smarthost`, par exemple
+`smtp.gmail.com:587`), l'expéditeur (`from`), le destinataire (`to`), l'identifiant et le
+mot de passe SMTP. Avec Gmail : compte avec validation en deux étapes et **mot de passe
+d'application** (pas le mot de passe du compte).
+
+> Le cluster doit pouvoir joindre le serveur SMTP. Sur AWS, le **port 25 sortant est
+> bloqué par défaut** : utiliser le port **587** (STARTTLS), comme dans l'exemple.
+
+**1. Autoriser ESO à lire le chemin Vault de la plateforme.** La politique actuelle
+(`rhbk-read`) ne couvre que `secret/rhbk/*`. Depuis le dossier de `rhbk-platform` :
+
+```bash
+cd /usr/local/dev/rhbk-platform
+```
+
+```bash
+{ echo "export VAULT_TOKEN='$(python3 -c 'import json;print(json.load(open("vault-init.json"))["root_token"])')'"; cat <<'EOF'
+set -e
+vault policy write platform-alertmanager-read - <<'POL'
+path "secret/data/platform/alertmanager/*" {
+  capabilities = ["read"]
+}
+POL
+vault write auth/kubernetes/role/external-secrets \
+  bound_service_account_names=external-secrets \
+  bound_service_account_namespaces=external-secrets \
+  policies=rhbk-read,platform-alertmanager-read \
+  ttl=1h
+EOF
+} | oc exec -i -n vault vault-0 -- sh -s
+```
+
+**2. Ranger les paramètres SMTP dans Vault** (`secret/platform/alertmanager/smtp`).
+Toutes les valeurs sont demandées au terminal, sans affichage :
+
+```bash
+python3 -c "$(cat <<'EOF'
+import json, getpass
+ask = getpass.getpass
+tok = json.load(open("vault-init.json"))["root_token"]
+data = {k: ask(k + ": ") for k in ("smarthost", "from", "to", "username", "password")}
+print("set -e"); print(f"export VAULT_TOKEN={json.dumps(tok)}"); print("umask 077")
+print("cat > /tmp/v.json <<'JSONEOF'"); print(json.dumps(data)); print("JSONEOF")
+print("vault kv put -mount=secret platform/alertmanager/smtp @/tmp/v.json >/dev/null && echo 'written platform/alertmanager/smtp'")
+print("rm -f /tmp/v.json")
+EOF
+)" | oc exec -i -n vault vault-0 -- sh -s
+```
+
+**3. Remplacer la configuration de test par le modèle SMTP**, dans `rhbk-platform` :
+
+```bash
+git rm monitoring/alertmanager-main.yaml && git mv monitoring/examples/alertmanager-main-smtp.yaml monitoring/alertmanager-main.yaml
+```
+
+Puis, dans `monitoring/kustomization.yaml`, retirer la ligne `- alert-webhook-test`
+(le récepteur de test n'est plus utile). Commit et push.
+
+**4. Synchroniser `platform-monitoring` sans « Prune »** : ESO reprend le Secret
+`alertmanager-main` existant (un Prune le supprimerait avant qu'ESO ne le recrée). Puis
+supprimer le récepteur de test :
+
+```bash
+oc delete namespace alert-webhook-test
+```
+
+**5. Vérifier** :
+
+```bash
+oc get externalsecret alertmanager-main -n openshift-monitoring
+```
+
+`SecretSynced`.
+
+```bash
+oc exec -n openshift-monitoring alertmanager-main-0 -c alertmanager -- amtool config routes show --alertmanager.url=http://localhost:9093
+```
+
+La route `rhbk-team` est présente. Lancer ensuite le test de la section 15.7.1 : un e-mail
+« RHBKNotificationTest » doit arriver. En cas d'échec d'envoi, les logs d'Alertmanager
+indiquent la cause (authentification, TLS, réseau) :
+
+```bash
+oc logs -n openshift-monitoring alertmanager-main-0 -c alertmanager | grep -i -E 'notify|smtp|email' | tail
+```
+
+**Changer un paramètre SMTP** (mot de passe, destinataire) : le modifier dans Vault
+(étape 2), puis forcer la relecture ; Alertmanager recharge sa configuration seul.
+
+```bash
+oc annotate externalsecret alertmanager-main -n openshift-monitoring force-sync=$(date +%s) --overwrite
+```
 
 ## 16. Dépannage
 
