@@ -1696,6 +1696,14 @@ ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 ou **Observe → Metrics** pour interroger les métriques (par exemple
 `agroal_active_count`, `http_server_requests_seconds_count`).
 
+**Tableaux de bord** : Grafana (`rhbk-platform`), `https://grafana.apps.<domaine>`,
+connexion avec le compte OpenShift, dossier **Keycloak** : tableaux officiels
+*Keycloak troubleshooting* (disponibilité, HTTP, percentiles de temps de réponse, base,
+JVM, caches, CPU) et *Keycloak capacity planning* (connexions réussies et échouées,
+émissions de jetons, par realm). Choisir le namespace `rhbk` ou `rhbk-dev` en haut du
+tableau. Les métriques de connexions et les percentiles reposent sur les options de la
+section 5.4 et du Containerfile (`user-event-metrics`, histogrammes HTTP).
+
 | Origine | Alertes | Défini dans |
 |---|---|---|
 | Keycloak et PostgreSQL, par environnement | section 5.6 | `rhbk-gitops`, `base/keycloak/prometheusrule.yaml` |
