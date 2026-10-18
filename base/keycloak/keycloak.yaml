@@ -65,9 +65,6 @@ spec:
     # Percentiles (p95, p99) of HTTP response times, used by the dashboards.
     - name: http-metrics-histograms-enabled
       value: "true"
-    # Logins, login errors, token issuance... per realm (feature user-event-metrics).
-    - name: event-metrics-user-enabled
-      value: "true"
   scheduling:
     affinity:
       podAntiAffinity:
