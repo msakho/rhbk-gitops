@@ -363,6 +363,11 @@ Le CR Keycloak. Points clés :
 - `image` figée par **digest** : ArgoCD déploie toujours exactement cette image.
 - `startOptimized: true` : l'image est déjà construite (`kc.sh build`), Keycloak
   démarre en `--optimized`. Les options de build de l'image doivent correspondre au CR.
+- `features: user-event-metrics` : déclare la fonctionnalité figée dans l'image.
+- `additionalOptions` : options **d'exécution** seulement (`metrics-enabled`,
+  `http-metrics-histograms-enabled` pour les percentiles de temps de réponse).
+  `event-metrics-user-enabled` (métriques de connexions par realm) est une option **de
+  build** : elle est dans le Containerfile, pas ici.
 - `db.host: postgres-db` : nom court, résolu dans le namespace de l'instance ;
   le même CR fonctionne dans les deux environnements.
 - `http.tlsSecret: rhbk-internal-tls` : le certificat interne de la section 5.2.
@@ -382,10 +387,15 @@ metadata:
 spec:
   instances: 1
   # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
-  # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled.
-  image: quay.io/msakho0/mskeycloak:26.6@sha256:b5c791e58570953cc45c5dbcbfe930f4b7c4bb81989a99a157f4147e45c13da7
+  # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
+  # features=user-event-metrics, event-metrics-user-enabled.
+  image: quay.io/msakho0/mskeycloak:26.6@sha256:9de7d1fcf003404c6acaaeae68406796a2b35b9f7d7e470afa85d2c6f1a6fd55
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true
+  # Must match the features baked in the image (custom-rhbk/Containerfile, KC_FEATURES).
+  features:
+    enabled:
+      - user-event-metrics
   # Only used on first start (empty database) to create the temporary admin.
   bootstrapAdmin:
     user:
@@ -427,6 +437,9 @@ spec:
     enabled: false
   additionalOptions:
     - name: metrics-enabled
+      value: "true"
+    # Percentiles (p95, p99) of HTTP response times, used by the dashboards.
+    - name: http-metrics-histograms-enabled
       value: "true"
   scheduling:
     affinity:
@@ -1362,6 +1375,18 @@ alors être réunis pour ces nouveaux namespaces :
 
 Toute option de build ajoutée dans le Containerfile (`KC_FEATURES`, `KC_CACHE`,
 providers…) doit être cohérente avec le CR.
+
+> **Option de build ou d'exécution ?** Une image optimisée **refuse de démarrer** si le CR
+> demande une option de build différente de celle figée dans l'image (message
+> `build time options have values that differ from what is persisted`, pod en
+> CrashLoopBackOff). Avant d'ajouter une option dans `additionalOptions`, vérifier
+> qu'elle apparaît dans l'aide d'exécution de l'image :
+> `oc exec -n rhbk-dev rhbk-dev-0 -- /opt/keycloak/bin/kc.sh start --optimized --help-all | grep <option>`.
+> Si elle n'y est pas, c'est une option de build : la mettre dans le Containerfile
+> (`KC_<OPTION>`), rebuilder, mettre à jour le digest. Attention : certaines options
+> n'apparaissent dans l'aide qu'une fois leur fonctionnalité activée
+> (`event-metrics-user-enabled` avec `user-event-metrics`). Après un tel échec, si le pod
+> reste bloqué une fois le CR corrigé, le supprimer (section 16).
 
 ### 15.2 Modifier un paramètre d'un seul environnement
 
