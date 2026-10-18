@@ -1696,7 +1696,12 @@ ExternalSecrets en `SecretSynced`, Applications `Synced` / `Healthy`.
 ou **Observe → Metrics** pour interroger les métriques (par exemple
 `agroal_active_count`, `http_server_requests_seconds_count`).
 
-**Tableaux de bord** : Grafana (`rhbk-platform`), `https://grafana.apps.<domaine>`,
+**Vue d'ensemble dans la console** : **Observe → Dashboards (Perses)**, projet
+`rhbk-observability`, tableau **RHBK - vue d'ensemble** (`rhbk-platform`, Cluster
+Observability Operator) : état de Keycloak, PostgreSQL, Vault, ESO et ArgoCD, trafic,
+erreurs, temps de réponse et connexions, prod et dev côte à côte.
+
+**Tableaux de bord détaillés** : Grafana (`rhbk-platform`), `https://grafana.apps.<domaine>`,
 connexion avec le compte OpenShift, dossier **Keycloak** : tableaux officiels
 *Keycloak troubleshooting* (disponibilité, HTTP, percentiles de temps de réponse, base,
 JVM, caches, CPU) et *Keycloak capacity planning* (connexions réussies et échouées,
