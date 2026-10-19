@@ -19,3 +19,6 @@
     limits:
       cpu: "2"
       memory: "2250M"
+- op: replace
+  path: /spec/tracing/samplerRatio
+  value: 0.1

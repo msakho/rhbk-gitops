@@ -59,6 +59,12 @@ spec:
   # The operator Ingress is disabled: exposure is handled by routes.yaml.
   ingress:
     enabled: false
+  # Traces (OpenTelemetry) sent to the collector of the platform (namespace rhbk-tracing).
+  # tracing.enabled is a BUILD-time option: it is set together with the image built with
+  # KC_TRACING_ENABLED=true (custom-rhbk/Containerfile). samplerRatio: share of traced requests.
+  tracing:
+    endpoint: http://otel-collector.rhbk-tracing.svc.cluster.local:4317
+    samplerRatio: 1
   additionalOptions:
     - name: metrics-enabled
       value: "true"
