@@ -20,6 +20,15 @@ spec:
           annotations:
             summary: "No Keycloak pod is ready in {{ $labels.namespace }}"
             description: "Check the pod (oc get pods), the database and the Keycloak CR status."
+        - alert: KeycloakDegraded
+          # With 2+ replicas a failed pod no longer stops the service: this alert makes it visible.
+          expr: kube_statefulset_status_replicas_ready{statefulset=~"rhbk-[a-z]+"} < kube_statefulset_replicas{statefulset=~"rhbk-[a-z]+"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak {{ $labels.statefulset }}: {{ $value }} pod(s) ready, fewer than expected"
+            description: "The service still runs on the remaining pods. Check the failed pod (oc get pods); if it stays on an old revision after a fix, delete it."
         - alert: KeycloakMetricsTargetDown
           expr: up{endpoint="management", service=~".+-service"} == 0
           for: 5m

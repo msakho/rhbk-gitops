@@ -6,3 +6,4 @@ resources:
   - keycloak.yaml
   - routes.yaml
   - prometheusrule.yaml
+  - poddisruptionbudget.yaml

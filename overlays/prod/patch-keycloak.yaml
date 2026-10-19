@@ -3,7 +3,7 @@
   value: rhbk-prod
 - op: replace
   path: /spec/instances
-  value: 1
+  value: 2
 - op: replace
   path: /spec/hostname/hostname
   value: https://prod-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com

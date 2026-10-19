@@ -1,0 +1,16 @@
+# The Keycloak operator creates no PodDisruptionBudget. maxUnavailable: 1 keeps at least one pod
+# during node drains when there are 2+ replicas, and never blocks a drain with a single replica
+# (unlike maxUnavailable: 0, which forbids any eviction).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: keycloak
+      app.kubernetes.io/managed-by: keycloak-operator
+      app.kubernetes.io/instance: KEYCLOAK_NAME   # replaced by the overlay

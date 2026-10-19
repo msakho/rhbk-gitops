@@ -83,6 +83,7 @@ Kustomize assemble base + overlay au moment où ArgoCD lit le dépôt.
 | `Route rhbk-public-realms` | Hostname public, chemin `/realms` uniquement. |
 | `Route rhbk-public-resources` | Hostname public, chemin `/resources` uniquement. |
 | `Route rhbk-admin` | Hostname admin, tous les chemins (console). |
+| `PodDisruptionBudget keycloak` | Garde au moins un pod pendant les drainages de nœuds (section 5.7). |
 | `PrometheusRule keycloak-alerts` | Alertes Keycloak et PostgreSQL de l'environnement (section 5.6). |
 
 ### 1.4 Isolation de la console admin
@@ -227,6 +228,7 @@ base/
     keycloak.yaml
     routes.yaml
     prometheusrule.yaml
+    poddisruptionbudget.yaml
 overlays/
   prod/
     kustomization.yaml
@@ -281,6 +283,7 @@ resources:
   - keycloak.yaml
   - routes.yaml
   - prometheusrule.yaml
+  - poddisruptionbudget.yaml
 ```
 
 ### 5.2 `base/keycloak/internal-svc.yaml`
@@ -543,6 +546,7 @@ crée l'opérateur, port de gestion 9000) et les métriques de pods du namespace
 |---|---|---|
 | `KeycloakNotReady` | aucun pod Keycloak prêt depuis 5 min | critical |
 | `PostgresNotReady` | pod PostgreSQL non prêt depuis 5 min | critical |
+| `KeycloakDegraded` | moins de pods prêts que de replicas demandés depuis 10 min (le service tourne sur les autres) | warning |
 | `KeycloakMetricsTargetDown` | port de métriques injoignable depuis 5 min | warning |
 | `KeycloakFrequentRestarts` | plus de 2 redémarrages en 1 h | warning |
 | `KeycloakHighServerErrorRate` | plus de 5 % de réponses 5xx pendant 10 min (hors `/health`, `/metrics`) | warning |
@@ -573,6 +577,15 @@ spec:
           annotations:
             summary: "No Keycloak pod is ready in {{ $labels.namespace }}"
             description: "Check the pod (oc get pods), the database and the Keycloak CR status."
+        - alert: KeycloakDegraded
+          # With 2+ replicas a failed pod no longer stops the service: this alert makes it visible.
+          expr: kube_statefulset_status_replicas_ready{statefulset=~"rhbk-[a-z]+"} < kube_statefulset_replicas{statefulset=~"rhbk-[a-z]+"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak {{ $labels.statefulset }}: {{ $value }} pod(s) ready, fewer than expected"
+            description: "The service still runs on the remaining pods. Check the failed pod (oc get pods); if it stays on an old revision after a fix, delete it."
         - alert: KeycloakMetricsTargetDown
           expr: up{endpoint="management", service=~".+-service"} == 0
           for: 5m
@@ -634,6 +647,33 @@ spec:
             description: "Keycloak cannot work without its database (postgres-db)."
 ```
 
+### 5.7 `base/keycloak/poddisruptionbudget.yaml`
+
+L'opérateur Keycloak ne crée pas de PodDisruptionBudget. Avec `maxUnavailable: 1`, un
+drainage de nœud (mise à jour d'OpenShift…) garde au moins un pod quand il y a 2 replicas
+ou plus, et n'est **jamais bloqué** avec un seul replica. À l'inverse, `maxUnavailable: 0`
+avec un seul replica interdit toute éviction et bloque les drainages (cas rencontré avec
+le chart Vault).
+
+```yaml
+# The Keycloak operator creates no PodDisruptionBudget. maxUnavailable: 1 keeps at least one pod
+# during node drains when there are 2+ replicas, and never blocks a drain with a single replica
+# (unlike maxUnavailable: 0, which forbids any eviction).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: keycloak
+      app.kubernetes.io/managed-by: keycloak-operator
+      app.kubernetes.io/instance: KEYCLOAK_NAME   # replaced by the overlay
+```
+
 ## 6. Les overlays prod et dev
 
 Chaque overlay contient 4 fichiers. Ils ne diffèrent entre prod et dev que par les
@@ -649,7 +689,8 @@ valeurs.
 - `patches` : l'ordre compte. `patch-routes.yaml` met le hostname public sur
   **toutes** les routes, puis `patch-route-admin.yaml` corrige celui de `rhbk-admin`.
 - `replacements` : recopie le nom de l'instance Keycloak (fixé par
-  `patch-keycloak.yaml`) dans le sélecteur du Service et dans l'anti-affinity. Le
+  `patch-keycloak.yaml`) dans les sélecteurs du Service et du PodDisruptionBudget, et
+  dans l'anti-affinity. Le
   nom n'est ainsi écrit qu'à un seul endroit.
 
 ```yaml
@@ -688,6 +729,11 @@ replacements:
         fieldPaths:
           - spec.selector.app\.kubernetes\.io/instance
       - select:
+          kind: PodDisruptionBudget
+          name: keycloak
+        fieldPaths:
+          - spec.selector.matchLabels.app\.kubernetes\.io/instance
+      - select:
           kind: Keycloak
         fieldPaths:
           - spec.scheduling.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.0.podAffinityTerm.labelSelector.matchLabels.app\.kubernetes\.io/instance
@@ -695,7 +741,8 @@ replacements:
 
 ### 6.2 `overlays/prod/patch-keycloak.yaml`
 
-Patch JSON 6902 (liste d'opérations) appliqué au CR Keycloak.
+Patch JSON 6902 (liste d'opérations) appliqué au CR Keycloak. La prod tourne avec
+**2 instances** (haute disponibilité, section 15.8) ; dev avec une seule.
 
 ```yaml
 - op: replace
@@ -703,7 +750,7 @@ Patch JSON 6902 (liste d'opérations) appliqué au CR Keycloak.
   value: rhbk-prod
 - op: replace
   path: /spec/instances
-  value: 1
+  value: 2
 - op: replace
   path: /spec/hostname/hostname
   value: https://prod-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
@@ -1888,6 +1935,40 @@ oc logs -n openshift-monitoring alertmanager-main-0 -c alertmanager | grep -i -E
 ```bash
 oc annotate externalsecret alertmanager-main -n openshift-monitoring force-sync=$(date +%s) --overwrite
 ```
+
+### 15.8 Comment l'opérateur applique un changement (et pourquoi 2 replicas)
+
+L'opérateur Keycloak applique un changement du CR de deux façons
+(`spec.update.strategy`, par défaut `RecreateOnImageChange`) :
+
+| Changement | Méthode | Effet |
+|---|---|---|
+| **Sans changement d'image** (option d'exécution, ressources, nombre d'instances…) | **rolling update** du StatefulSet : un pod après l'autre, en commençant par le numéro le plus élevé, chacun devant être Ready avant le suivant | avec **2 replicas ou plus**, pas de coupure ; si le nouveau pod échoue, la mise à jour s'arrête et les autres pods continuent sur l'ancienne version |
+| **Avec changement d'image** (nouveau digest) | **recreate** : tous les pods sont arrêtés puis recréés (deux versions différentes ne partagent pas leurs caches) | **coupure** de quelques dizaines de secondes, quel que soit le nombre de replicas ; si la nouvelle version échoue, plus aucun pod ne répond |
+
+**Pod bloqué sur une ancienne révision** : un pod de StatefulSet qui n'a jamais été
+Ready n'est jamais remplacé, même après correction du CR (le StatefulSet attend qu'il
+soit Ready). Il faut le supprimer : `oc delete pod <pod> -n <namespace>`. C'est vrai avec
+1 ou plusieurs replicas ; avec 2 replicas et un rolling update, le service continue
+pendant ce temps sur l'autre pod.
+
+**Règles à suivre** :
+
+1. **Ne pas mélanger, dans un même commit, un nouveau digest d'image et des changements
+   d'options.** Un changement d'options seul passe en rolling update : avec 2 replicas,
+   une option fautive ne touche qu'un pod.
+2. **Tester en dev d'abord** (synchro automatique) ; la prod (synchro manuelle) ne reçoit
+   le changement qu'une fois validé.
+3. **Avant d'ajouter une option dans le CR, vérifier qu'elle est d'exécution** (section
+   15.1) : une option de build différente de l'image empêche Keycloak de démarrer.
+4. **Prod à 2 replicas minimum**, avec le PodDisruptionBudget `maxUnavailable: 1`
+   (section 5.7) et l'alerte `KeycloakDegraded`, qui signale un pod en échec que le
+   service masque.
+
+**Option à évaluer** : `spec.update.strategy: Auto`. L'opérateur lance un Job qui vérifie
+si l'ancienne et la nouvelle image peuvent cohabiter : si oui (simple changement
+d'options de build, correctif mineur), il fait un rolling update même quand l'image
+change ; sinon, un recreate. À tester en dev avant de l'appliquer en prod.
 
 ## 16. Dépannage
 
