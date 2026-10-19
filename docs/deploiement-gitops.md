@@ -1963,7 +1963,7 @@ L'opérateur Keycloak applique un changement du CR de deux façons
 | Changement | Méthode | Effet |
 |---|---|---|
 | **Sans changement d'image** (option d'exécution, ressources, nombre d'instances…) | **rolling update** du StatefulSet : un pod après l'autre, en commençant par le numéro le plus élevé, chacun devant être Ready avant le suivant | avec **2 replicas ou plus**, pas de coupure ; si le nouveau pod échoue, la mise à jour s'arrête et les autres pods continuent sur l'ancienne version |
-| **Avec changement d'image** (nouveau digest) | **recreate** : tous les pods sont arrêtés puis recréés (deux versions différentes ne partagent pas leurs caches) | **coupure** de quelques dizaines de secondes, quel que soit le nombre de replicas ; si la nouvelle version échoue, plus aucun pod ne répond |
+| **Avec changement d'image** (nouveau digest) | **recreate** : tous les pods sont arrêtés puis recréés (deux versions différentes ne partagent pas leurs caches) | **coupure** d'environ **1 minute** (mesurée en prod avec 2 replicas lors du passage à l'image tracée), quel que soit le nombre de replicas ; si la nouvelle version échoue, plus aucun pod ne répond |
 
 **Pod bloqué sur une ancienne révision** : un pod de StatefulSet qui n'a jamais été
 Ready n'est jamais remplacé, même après correction du CR (le StatefulSet attend qu'il
