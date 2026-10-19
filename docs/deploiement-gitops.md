@@ -670,11 +670,26 @@ spec:
 
 ### 5.7 `base/keycloak/poddisruptionbudget.yaml`
 
-L'opérateur Keycloak ne crée pas de PodDisruptionBudget. Avec `maxUnavailable: 1`, un
-drainage de nœud (mise à jour d'OpenShift…) garde au moins un pod quand il y a 2 replicas
-ou plus, et n'est **jamais bloqué** avec un seul replica. À l'inverse, `maxUnavailable: 0`
-avec un seul replica interdit toute éviction et bloque les drainages (cas rencontré avec
-le chart Vault).
+Un PodDisruptionBudget (PDB) limite le nombre de pods arrêtés en même temps lors d'une
+**interruption volontaire**, c'est-à-dire surtout un **drainage de nœud** (mise à jour
+d'OpenShift, maintenance). Avant d'évincer un pod, le drainage consulte le PDB et attend
+si l'éviction ferait passer sous le seuil. Le PDB ne protège ni contre une panne (nœud
+perdu, crash) ni contre un rollout de l'opérateur Keycloak.
+
+L'opérateur Keycloak ne crée pas de PodDisruptionBudget : on l'ajoute dans la base, donc
+**prod et dev en ont un**. Le même `maxUnavailable: 1` se comporte différemment selon le
+nombre de replicas :
+
+| | Prod (2 replicas) | Dev (1 replica) |
+|---|---|---|
+| Drainage d'un nœud | un pod évincé à la fois, le second seulement quand le premier est de nouveau prêt ailleurs : **pas de coupure** | le pod unique peut être évincé : le drainage n'est **jamais bloqué**, courte coupure acceptée en dev |
+
+À l'inverse, `maxUnavailable: 0` (ou `minAvailable: 1` avec un seul replica) interdit
+toute éviction et **bloque les drainages** (cas rencontré avec le chart Vault, alerte
+`PodDisruptionBudgetAtLimit`). Avec `maxUnavailable: 1`, un seul fichier convient aux deux
+environnements : l'overlay ne remplace que le nom d'instance dans le sélecteur
+(`replacements`, section 6.1). Le PDB complète l'anti-affinité du CR (section 5.4), qui
+place les pods de prod sur des nœuds différents : un drainage n'en touche qu'un.
 
 ```yaml
 # The Keycloak operator creates no PodDisruptionBudget. maxUnavailable: 1 keeps at least one pod
