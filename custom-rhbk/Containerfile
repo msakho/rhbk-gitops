@@ -10,6 +10,9 @@ ENV KC_METRICS_ENABLED=true
 # if the CR asks for a different value). The CR declares the same feature (spec.features).
 ENV KC_FEATURES=user-event-metrics
 ENV KC_EVENT_METRICS_USER_ENABLED=true
+# Traces (OpenTelemetry): build-time option. Endpoint and sampler ratio are runtime options
+# (spec.tracing in the Keycloak CR, set by the platform collector address).
+ENV KC_TRACING_ENABLED=true
 
 WORKDIR /opt/keycloak
 
