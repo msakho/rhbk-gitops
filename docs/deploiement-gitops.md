@@ -41,6 +41,7 @@ En suivant ce guide dans un dépôt vide, on obtient exactement le dépôt
 17. [Annexe A : plateforme (dépôt rhbk-platform) et Vault](#17-annexe-a--plateforme-dépôt-rhbk-platform-et-vault)
 18. [Annexe B : créer la base PostgreSQL d'un environnement](#18-annexe-b--créer-la-base-postgresql-dun-environnement)
 19. [Annexe C : générer le certificat d'un environnement](#19-annexe-c--générer-le-certificat-dun-environnement)
+20. [Annexe D : observabilité (vue d'ensemble)](#20-annexe-d--observabilité-vue-densemble)
 
 ---
 
@@ -2549,3 +2550,145 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
 À lancer quand tu as fini, pour retirer la clé AWS du terminal.
 
+---
+
+## 20. Annexe D : observabilité (vue d'ensemble)
+
+Cette annexe rassemble toute l'observabilité de RHBK : ce qui est en place, où le voir,
+où c'est défini, comment le mettre en place et les pièges rencontrés. Le détail est dans
+les sections référencées et dans le README de `rhbk-platform`.
+
+### D.1 Architecture
+
+```
+                                   ┌──────────────── console OpenShift ────────────────┐
+                                   │ Observe → Alerting / Metrics / Dashboards (Perses)│
+                                   │ Observe → Logs           Observe → Traces          │
+                                   └──────────▲──────────────▲──────────────▲───────────┘
+ Keycloak rhbk-prod / rhbk-dev                │              │              │
+ ├─ métriques (port 9000) ──▶ Prometheus (projets utilisateur) ──▶ Thanos Querier ──▶ Grafana
+ │                            └─▶ Thanos Ruler (alertes) ──▶ Alertmanager ──▶ rhbk-team (webhook / SMTP)
+ ├─ logs JSON (stdout) ─────▶ collecteur Vector (chaque nœud) ──▶ LokiStack ──▶ bucket NooBaa loki-rhbk
+ └─ traces OTLP (4317) ─────▶ OpenTelemetry Collector ──▶ TempoStack (passerelle) ──▶ bucket NooBaa tempo-rhbk
+ PostgreSQL, Vault, ESO, ArgoCD : état des pods (kube-state-metrics), métriques ESO et ArgoCD, logs
+```
+
+### D.2 Quoi, où le voir, où c'est défini
+
+| Besoin | Où le voir | Défini dans | Section |
+|---|---|---|---|
+| État d'ensemble (prod / dev, base, Vault, ESO, ArgoCD, trafic, connexions) | Observe → Dashboards (Perses), projet `rhbk-observability` | `rhbk-platform` : `observability-console/` | README plateforme |
+| Tableaux officiels Keycloak (*troubleshooting*, *capacity planning*) | `https://grafana.apps.<domaine>` (compte OpenShift) | `rhbk-platform` : `grafana/` | 15.6 |
+| Alertes Keycloak / PostgreSQL | Observe → Alerting | `rhbk-gitops` : `base/keycloak/prometheusrule.yaml` | 5.6, 15.6 |
+| Alertes ESO, Vault, ArgoCD | Observe → Alerting | `rhbk-platform` : `monitoring/` | 15.6 |
+| Notifications | logs du webhook `alert-webhook-test` (puis e-mail) | `rhbk-platform` : `monitoring/alertmanager-main.yaml` | 15.7 |
+| Requêtes sur les métriques | Observe → Metrics | — | 15.6 |
+| Logs (Keycloak en JSON, PostgreSQL, Vault, ESO, ArgoCD) | Observe → Logs | `rhbk-platform` : `logging/` ; option Keycloak dans `base/keycloak/keycloak.yaml` | 15.9 |
+| Traces (requête HTTP → traitement → SQL) | Observe → Traces, instance `rhbk-tracing / tempo`, tenant `rhbk` | `rhbk-platform` : `tracing/` ; `spec.tracing` dans le CR | 15.10 |
+| Haute disponibilité de Keycloak (prod) | Observe → Dashboards, alerte `KeycloakDegraded` | `overlays/prod/patch-keycloak.yaml`, `base/keycloak/poddisruptionbudget.yaml` | 5.7, 15.8 |
+
+| Conservation | Durée | Stockage |
+|---|---|---|
+| Métriques (projets utilisateur) | 7 jours | 2 PVC de 5 Gi (`ocs-storagecluster-ceph-rbd`) |
+| Logs | 7 jours | bucket NooBaa `loki-rhbk` |
+| Traces | 72 heures | bucket NooBaa `tempo-rhbk` |
+
+### D.3 Mise en place, dans l'ordre
+
+**Plateforme** (`rhbk-platform`, détail dans son README, « Ordre de déploiement ») :
+
+| Étape | Application(s) | Apporte |
+|---|---|---|
+| 1 | `platform-monitoring` | surveillance des projets utilisateur (désactivée par défaut), rétention et PVC, collecte ESO, alertes ESO / Vault / ArgoCD, configuration d'Alertmanager et webhook de test |
+| 2 | `grafana-operator`, puis `grafana` | Grafana derrière le proxy OAuth, source Thanos Querier, tableaux officiels Keycloak |
+| 3 | `loki-operator`, `logging-operator`, puis `logging` | LokiStack, collecteur (applications + `openshift-gitops`) |
+| 4 | `tempo-operator`, `otel-operator`, puis `tracing` | TempoStack, OpenTelemetry Collector |
+| 5 | `coo-operator`, puis `observability-console` | plugins de la console : Perses (vue d'ensemble), Logs, Traces |
+
+**Application** (`rhbk-gitops`), dans cet ordre (règles de la section 15.8) :
+
+| Étape | Changement | Type | Effet en prod |
+|---|---|---|---|
+| 1 | `PrometheusRule` et `PodDisruptionBudget` (base) | ressources | aucun |
+| 2 | options d'exécution du CR : `metrics-enabled`, `http-metrics-histograms-enabled`, `log-console-output: json`, `spec.tracing.endpoint` et `samplerRatio` | commit d'options | rolling update, sans coupure (2 replicas) |
+| 3 | image avec les options de build (`KC_FEATURES=user-event-metrics`, `KC_EVENT_METRICS_USER_ENABLED`, `KC_TRACING_ENABLED`), nouveau digest, `features` et `tracing.enabled` dans le CR | commit d'image | recreate, coupure d'environ 1 minute |
+
+### D.4 Options Keycloak de l'observabilité
+
+| Option | Type | Où | Rôle |
+|---|---|---|---|
+| `metrics-enabled` | build **et** exécution | Containerfile + CR | expose `/metrics` (port 9000) |
+| `health-enabled` | build | Containerfile | sondes `/health` |
+| `user-event-metrics` (fonctionnalité) | build | Containerfile (`KC_FEATURES`) + CR (`features`) | métriques de connexions par realm |
+| `event-metrics-user-enabled` | **build** | Containerfile | active ces métriques (`keycloak_user_events_total`) |
+| `http-metrics-histograms-enabled` | exécution | CR | percentiles de temps de réponse |
+| `log-console-output: json` | exécution | CR | logs JSON exploitables dans Loki |
+| `tracing-enabled` | **build** | Containerfile + CR (`tracing.enabled`, même valeur) | traces OpenTelemetry |
+| `tracing-endpoint`, `tracing-sampler-ratio` | exécution | CR (`spec.tracing`) | adresse du Collector, part des requêtes tracées (dev 100 %, prod 10 %) |
+
+Vérifier le type d'une option avant de l'ajouter au CR (section 15.1) :
+`oc exec -n rhbk-dev rhbk-dev-0 -- /opt/keycloak/bin/kc.sh start --optimized --help-all | grep <option>`
+(absente = option de build).
+
+### D.5 Vérifier que tout fonctionne
+
+```bash
+oc get pods -n openshift-user-workload-monitoring
+```
+
+```bash
+oc exec -n openshift-user-workload-monitoring prometheus-user-workload-0 -c prometheus -- curl -s --data-urlencode 'query=up' http://localhost:9090/api/v1/query
+```
+
+Les cibles `rhbk-prod-service`, `rhbk-dev-service` et `external-secrets-metrics` doivent valoir 1.
+
+```bash
+oc exec -n openshift-monitoring alertmanager-main-0 -c alertmanager -- amtool config routes show --alertmanager.url=http://localhost:9093
+```
+
+```bash
+oc get lokistack logging-loki -n openshift-logging && oc get clusterlogforwarder collector -n openshift-logging
+```
+
+```bash
+oc get tempostack tempo -n rhbk-tracing && oc get opentelemetrycollector otel -n rhbk-tracing
+```
+
+```bash
+oc get uiplugin
+```
+
+Les plugins `monitoring`, `logging` et `distributed-tracing` doivent être `Available`.
+
+Puis dans la console : une alerte de test (section 15.7.1), la requête de logs
+`{kubernetes_namespace_name="rhbk-dev"} | json | level=~"warn|error"` (section 15.9) et la
+requête de traces `{resource.service.name="rhbk-dev"}` (section 15.10).
+
+### D.6 Pièges rencontrés et solutions
+
+| Piège | Symptôme | Solution |
+|---|---|---|
+| Surveillance des projets utilisateur **désactivée par défaut** | ServiceMonitors présents mais aucune métrique collectée | `enableUserWorkload: true` (`platform-monitoring`) |
+| Prometheus des projets utilisateur sans volume | métriques perdues à chaque redémarrage | `user-workload-monitoring-config` : PVC et rétention 7 jours |
+| Option de build placée dans le CR | Keycloak en CrashLoopBackOff (`build time options have values that differ`) | la mettre dans le Containerfile, rebuild (section 15.1) |
+| Pod de StatefulSet bloqué sur une ancienne révision | le pod reste en échec après correction du CR | `oc delete pod <pod>` (section 15.8) |
+| ESO isolé par des NetworkPolicies *deny-all* | `vault-store` invalide (`context deadline exceeded`) | sortie vers Vault dans `ExternalSecretsConfig` (annexe A.2) |
+| ESO espace ses tentatives après un Vault scellé | ExternalSecrets en erreur après descellement ; alerte `ExternalSecretNotSynced` | relecture forcée (section 15.5) |
+| Valeurs par défaut ajoutées par les webhooks (ESO, Grafana, Tempo) | Application `OutOfSync` permanente | les déclarer dans git (forme normalisée : `72h0m0s`, `protocol: TCP`, version Grafana…) |
+| PDB `maxUnavailable: 0` avec un seul replica (chart Vault) | alerte `PodDisruptionBudgetAtLimit`, drainages bloqués | PDB désactivé pour Vault ; `maxUnavailable: 1` pour Keycloak |
+| Grafana : référence `DS_PROMETHEUS` écrite dans l'uid | variable `namespace` vide, panneaux vides | source de données avec l'uid fixe `Prometheus` (immuable : supprimer puis recréer) |
+| Grafana brièvement en échec au démarrage | synchro interrompue avant les tableaux | `retry` dans l'Application |
+| Deux paquets `loki-operator` | version communautaire installée par erreur | catalogue `redhat-operators` |
+| LokiStack `1x.demo` | avertissement « ingester replicas (1) » | normal (pas de haute disponibilité) ; `1x.pico` en production |
+| Logs : JSON dans du JSON | champs Keycloak inaccessibles | `| json | line_format "{{.message}}" | json` ; le niveau est déjà extrait (section 15.9) |
+| Schéma des Routes absent au redémarrage | Applications ArgoCD en `Unknown` (`parseableType`) | attendre, puis redémarrer le contrôleur ArgoCD si plus de 15 minutes (section 15.5) |
+| Alertes système dans nos namespaces | une alerte OpenShift (ex. PDB de Vault) arrive à `rhbk-team` | voulu : la route couvre tout le namespace |
+
+### D.7 Renvois
+
+- 5.4 : options du CR Keycloak ; 5.6 : alertes Keycloak ; 5.7 : PodDisruptionBudget
+- 15.1 : options de build et d'exécution ; 15.5 : après un redémarrage ; 15.6 : alertes et
+  tableaux de bord ; 15.7 : notifications et SMTP ; 15.8 : rolling update et recreate ;
+  15.9 : logs ; 15.10 : traces ; 16 : dépannage
+- README de `rhbk-platform` : sections « Surveillance », « Grafana », « Vue d'ensemble dans
+  la console (Perses) », « Logs centralisés », « Traces », « Ordre de déploiement »
