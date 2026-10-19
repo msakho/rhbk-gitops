@@ -13,10 +13,12 @@ spec:
   # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
   # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
   # features=user-event-metrics, event-metrics-user-enabled, tracing-enabled.
+  # Observability options are tagged by part below (docs/observabilite.md).
   image: quay.io/msakho0/mskeycloak:26.6@sha256:33e17c25d6cc2c8a44fe70f7126fb3165ff9be56a56099b350135656ddd801cc
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true
-  # Must match the features baked in the image (custom-rhbk/Containerfile, KC_FEATURES).
+  # [Observability part 2 - dashboards] must match the features baked in the image
+  # (custom-rhbk/Containerfile, KC_FEATURES).
   features:
     enabled:
       - user-event-metrics
@@ -59,7 +61,8 @@ spec:
   # The operator Ingress is disabled: exposure is handled by routes.yaml.
   ingress:
     enabled: false
-  # Traces (OpenTelemetry) sent to the collector of the platform (namespace rhbk-tracing).
+  # [Observability part 4 - traces] OpenTelemetry traces sent to the collector of the platform
+  # (namespace rhbk-tracing).
   # tracing.enabled is a BUILD-time option: it is set together with the image built with
   # KC_TRACING_ENABLED=true (custom-rhbk/Containerfile). samplerRatio: share of traced requests.
   tracing:
@@ -67,13 +70,14 @@ spec:
     endpoint: http://otel-collector.rhbk-tracing.svc.cluster.local:4317
     samplerRatio: 1
   additionalOptions:
+    # [Observability part 1 - metrics and alerts] /metrics endpoint.
     - name: metrics-enabled
       value: "true"
-    # Percentiles (p95, p99) of HTTP response times, used by the dashboards.
+    # [Observability part 2 - dashboards] percentiles (p95, p99) of HTTP response times.
     - name: http-metrics-histograms-enabled
       value: "true"
-    # JSON console logs (runtime option): fields (level, loggerName, message...) can be filtered
-    # in Loki with the "| json" LogQL parser.
+    # [Observability part 3 - logs] JSON console logs (runtime option): fields (level, loggerName,
+    # message...) can be filtered in Loki with the "| json" LogQL parser.
     - name: log-console-output
       value: json
   scheduling:

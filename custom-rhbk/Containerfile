@@ -2,16 +2,19 @@ FROM registry.redhat.io/rhbk/keycloak-rhel9:26.6 AS builder
 
 # Build-time options: they are baked into the optimized image and must match the
 # Keycloak CR (base/keycloak/keycloak.yaml), since the operator starts a custom image with --optimized.
+# An optimized image refuses to start if the CR asks for a different value of a build-time option.
+# Grouped by observability part (docs/observabilite.md): keep only the lines of the parts you deploy.
 ENV KC_DB=postgres
+# [Observability part 1 - metrics and alerts] health probes and /metrics endpoint (port 9000).
 ENV KC_HEALTH_ENABLED=true
 ENV KC_METRICS_ENABLED=true
-# User event metrics (logins, login errors, token issuance... per realm): the feature AND
-# event-metrics-user-enabled are both build-time options (an optimized image refuses to start
-# if the CR asks for a different value). The CR declares the same feature (spec.features).
+# [Observability part 2 - dashboards] user event metrics (logins, login errors, token issuance...
+# per realm): the feature AND event-metrics-user-enabled are build-time options. The CR declares
+# the same feature (spec.features).
 ENV KC_FEATURES=user-event-metrics
 ENV KC_EVENT_METRICS_USER_ENABLED=true
-# Traces (OpenTelemetry): build-time option. Endpoint and sampler ratio are runtime options
-# (spec.tracing in the Keycloak CR, set by the platform collector address).
+# [Observability part 4 - traces] OpenTelemetry tracing: build-time option. Endpoint and sampler
+# ratio are runtime options (spec.tracing in the Keycloak CR).
 ENV KC_TRACING_ENABLED=true
 
 WORKDIR /opt/keycloak

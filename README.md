@@ -3,6 +3,7 @@
 Déploiement GitOps (OpenShift GitOps / ArgoCD) de Red Hat build of Keycloak 26.6, environnements **prod** et **dev**.
 
 > Guide pas à pas pour reconstruire ce dépôt et le déployer : [docs/deploiement-gitops.md](docs/deploiement-gitops.md)
+> Observabilité, partie par partie (métriques et alertes, tableaux de bord, logs, traces) : [docs/observabilite.md](docs/observabilite.md)
 
 ## Arborescence
 

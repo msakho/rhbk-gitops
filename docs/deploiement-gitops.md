@@ -398,10 +398,12 @@ spec:
   # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
   # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
   # features=user-event-metrics, event-metrics-user-enabled, tracing-enabled.
+  # Observability options are tagged by part below (docs/observabilite.md).
   image: quay.io/msakho0/mskeycloak:26.6@sha256:33e17c25d6cc2c8a44fe70f7126fb3165ff9be56a56099b350135656ddd801cc
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true
-  # Must match the features baked in the image (custom-rhbk/Containerfile, KC_FEATURES).
+  # [Observability part 2 - dashboards] must match the features baked in the image
+  # (custom-rhbk/Containerfile, KC_FEATURES).
   features:
     enabled:
       - user-event-metrics
@@ -444,7 +446,8 @@ spec:
   # The operator Ingress is disabled: exposure is handled by routes.yaml.
   ingress:
     enabled: false
-  # Traces (OpenTelemetry) sent to the collector of the platform (namespace rhbk-tracing).
+  # [Observability part 4 - traces] OpenTelemetry traces sent to the collector of the platform
+  # (namespace rhbk-tracing).
   # tracing.enabled is a BUILD-time option: it is set together with the image built with
   # KC_TRACING_ENABLED=true (custom-rhbk/Containerfile). samplerRatio: share of traced requests.
   tracing:
@@ -452,13 +455,14 @@ spec:
     endpoint: http://otel-collector.rhbk-tracing.svc.cluster.local:4317
     samplerRatio: 1
   additionalOptions:
+    # [Observability part 1 - metrics and alerts] /metrics endpoint.
     - name: metrics-enabled
       value: "true"
-    # Percentiles (p95, p99) of HTTP response times, used by the dashboards.
+    # [Observability part 2 - dashboards] percentiles (p95, p99) of HTTP response times.
     - name: http-metrics-histograms-enabled
       value: "true"
-    # JSON console logs (runtime option): fields (level, loggerName, message...) can be filtered
-    # in Loki with the "| json" LogQL parser.
+    # [Observability part 3 - logs] JSON console logs (runtime option): fields (level, loggerName,
+    # message...) can be filtered in Loki with the "| json" LogQL parser.
     - name: log-console-output
       value: json
   scheduling:
@@ -2558,6 +2562,10 @@ Cette annexe rassemble toute l'observabilité de RHBK : ce qui est en place, où
 où c'est défini, comment le mettre en place et les pièges rencontrés. Le détail est dans
 les sections référencées et dans le README de `rhbk-platform`.
 
+> **Mise en place partie par partie** (métriques et alertes, tableaux de bord, logs,
+> traces), avec le contenu complet de chaque fichier et la possibilité de ne déployer que
+> certaines parties : **`docs/observabilite.md`**.
+
 ### D.1 Architecture
 
 ```
@@ -2583,8 +2591,8 @@ les sections référencées et dans le README de `rhbk-platform`.
 | Alertes ESO, Vault, ArgoCD | Observe → Alerting | `rhbk-platform` : `monitoring/` | 15.6 |
 | Notifications | logs du webhook `alert-webhook-test` (puis e-mail) | `rhbk-platform` : `monitoring/alertmanager-main.yaml` | 15.7 |
 | Requêtes sur les métriques | Observe → Metrics | — | 15.6 |
-| Logs (Keycloak en JSON, PostgreSQL, Vault, ESO, ArgoCD) | Observe → Logs | `rhbk-platform` : `logging/` ; option Keycloak dans `base/keycloak/keycloak.yaml` | 15.9 |
-| Traces (requête HTTP → traitement → SQL) | Observe → Traces, instance `rhbk-tracing / tempo`, tenant `rhbk` | `rhbk-platform` : `tracing/` ; `spec.tracing` dans le CR | 15.10 |
+| Logs (Keycloak en JSON, PostgreSQL, Vault, ESO, ArgoCD) | Observe → Logs | `rhbk-platform` : `logging/` (y compris le plugin de console) ; option Keycloak dans `base/keycloak/keycloak.yaml` | 15.9 |
+| Traces (requête HTTP → traitement → SQL) | Observe → Traces, instance `rhbk-tracing / tempo`, tenant `rhbk` | `rhbk-platform` : `tracing/` (y compris le plugin de console) ; `spec.tracing` dans le CR | 15.10 |
 | Haute disponibilité de Keycloak (prod) | Observe → Dashboards, alerte `KeycloakDegraded` | `overlays/prod/patch-keycloak.yaml`, `base/keycloak/poddisruptionbudget.yaml` | 5.7, 15.8 |
 
 | Conservation | Durée | Stockage |
@@ -2601,9 +2609,9 @@ les sections référencées et dans le README de `rhbk-platform`.
 |---|---|---|
 | 1 | `platform-monitoring` | surveillance des projets utilisateur (désactivée par défaut), rétention et PVC, collecte ESO, alertes ESO / Vault / ArgoCD, configuration d'Alertmanager et webhook de test |
 | 2 | `grafana-operator`, puis `grafana` | Grafana derrière le proxy OAuth, source Thanos Querier, tableaux officiels Keycloak |
-| 3 | `loki-operator`, `logging-operator`, puis `logging` | LokiStack, collecteur (applications + `openshift-gitops`) |
-| 4 | `tempo-operator`, `otel-operator`, puis `tracing` | TempoStack, OpenTelemetry Collector |
-| 5 | `coo-operator`, puis `observability-console` | plugins de la console : Perses (vue d'ensemble), Logs, Traces |
+| 3 | `coo-operator`, puis `observability-console` | Cluster Observability Operator, vue d'ensemble Perses dans la console |
+| 4 | `loki-operator`, `logging-operator`, puis `logging` | LokiStack, collecteur (applications + `openshift-gitops`), plugin Logs de la console |
+| 5 | `tempo-operator`, `otel-operator`, puis `tracing` | TempoStack, OpenTelemetry Collector, plugin Traces de la console |
 
 **Application** (`rhbk-gitops`), dans cet ordre (règles de la section 15.8) :
 
@@ -2692,3 +2700,4 @@ requête de traces `{resource.service.name="rhbk-dev"}` (section 15.10).
   15.9 : logs ; 15.10 : traces ; 16 : dépannage
 - README de `rhbk-platform` : sections « Surveillance », « Grafana », « Vue d'ensemble dans
   la console (Perses) », « Logs centralisés », « Traces », « Ordre de déploiement »
+- **`docs/observabilite.md`** : mise en place partie par partie (1 à 4)
