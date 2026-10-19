@@ -368,7 +368,8 @@ Le CR Keycloak. Points clés :
   démarre en `--optimized`. Les options de build de l'image doivent correspondre au CR.
 - `features: user-event-metrics` : déclare la fonctionnalité figée dans l'image.
 - `additionalOptions` : options **d'exécution** seulement (`metrics-enabled`,
-  `http-metrics-histograms-enabled` pour les percentiles de temps de réponse).
+  `http-metrics-histograms-enabled` pour les percentiles de temps de réponse,
+  `log-console-output: json` pour des logs exploitables dans Loki, section 15.9).
   `event-metrics-user-enabled` (métriques de connexions par realm) est une option **de
   build** : elle est dans le Containerfile, pas ici.
 - `db.host: postgres-db` : nom court, résolu dans le namespace de l'instance ;
@@ -444,6 +445,10 @@ spec:
     # Percentiles (p95, p99) of HTTP response times, used by the dashboards.
     - name: http-metrics-histograms-enabled
       value: "true"
+    # JSON console logs (runtime option): fields (level, loggerName, message...) can be filtered
+    # in Loki with the "| json" LogQL parser.
+    - name: log-console-output
+      value: json
   scheduling:
     affinity:
       podAntiAffinity:
@@ -1969,6 +1974,31 @@ pendant ce temps sur l'autre pod.
 si l'ancienne et la nouvelle image peuvent cohabiter : si oui (simple changement
 d'options de build, correctif mineur), il fait un rolling update même quand l'image
 change ; sinon, un recreate. À tester en dev avant de l'appliquer en prod.
+
+### 15.9 Logs centralisés
+
+Les logs de Keycloak (et de PostgreSQL, Vault, ESO, ArgoCD…) sont collectés par
+OpenShift Logging et stockés 7 jours dans Loki (`rhbk-platform`, Application `logging`).
+Keycloak écrit ses logs en **JSON** (`log-console-output: json`, section 5.4).
+
+**Où les voir** : console OpenShift, **Observe → Logs** (choisir le namespace), ou onglet
+**Aggregated Logs** d'un pod. Les requêtes s'écrivent en **LogQL**.
+
+| Besoin | Requête |
+|---|---|
+| Tous les logs Keycloak de la prod | `{kubernetes_namespace_name="rhbk", kubernetes_container_name="keycloak"}` |
+| Seulement les avertissements et erreurs | `{kubernetes_namespace_name="rhbk", kubernetes_container_name="keycloak"} \| json \| level=~"warn\|error"` |
+| Les champs de Keycloak (`loggerName`, `message`…) | `{kubernetes_namespace_name="rhbk", kubernetes_container_name="keycloak"} \| json \| line_format "{{.message}}" \| json \| __error__=""` |
+| Par composant Keycloak | ajouter `\| loggerName=~"org.keycloak.events.*"` à la requête précédente |
+| Nombre de lignes par niveau (graphique) | `sum by (level) (count_over_time({kubernetes_namespace_name="rhbk", kubernetes_container_name="keycloak"} \| json [5m]))` |
+| ArgoCD | `{kubernetes_namespace_name="openshift-gitops"}` (tenant *infrastructure*) |
+
+Le collecteur enveloppe chaque ligne dans son propre JSON (namespace, pod, niveau…) : la
+ligne JSON de Keycloak est dans le champ `message` de cette enveloppe, d'où la double
+analyse `| json | line_format "{{.message}}" | json`. Le **niveau** est déjà extrait et
+normalisé (en minuscules) par le collecteur : une seule analyse suffit pour filtrer par
+niveau. `__error__=""` écarte les lignes non JSON (anciennes lignes, traces de pile
+coupées).
 
 ## 16. Dépannage
 
