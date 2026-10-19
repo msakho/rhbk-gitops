@@ -372,6 +372,10 @@ Le CR Keycloak. Points clés :
   `log-console-output: json` pour des logs exploitables dans Loki, section 15.9).
   `event-metrics-user-enabled` (métriques de connexions par realm) est une option **de
   build** : elle est dans le Containerfile, pas ici.
+- `tracing` : envoi des traces OpenTelemetry au Collector de la plateforme
+  (`rhbk-tracing`, section 15.10). `endpoint` et `samplerRatio` sont des options
+  d'exécution ; `enabled` est une option **de build** et doit correspondre à l'image
+  (`KC_TRACING_ENABLED` dans le Containerfile).
 - `db.host: postgres-db` : nom court, résolu dans le namespace de l'instance ;
   le même CR fonctionne dans les deux environnements.
 - `http.tlsSecret: rhbk-internal-tls` : le certificat interne de la section 5.2.
@@ -392,8 +396,8 @@ spec:
   instances: 1
   # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
   # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
-  # features=user-event-metrics, event-metrics-user-enabled.
-  image: quay.io/msakho0/mskeycloak:26.6@sha256:9de7d1fcf003404c6acaaeae68406796a2b35b9f7d7e470afa85d2c6f1a6fd55
+  # features=user-event-metrics, event-metrics-user-enabled, tracing-enabled.
+  image: quay.io/msakho0/mskeycloak:26.6@sha256:33e17c25d6cc2c8a44fe70f7126fb3165ff9be56a56099b350135656ddd801cc
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true
   # Must match the features baked in the image (custom-rhbk/Containerfile, KC_FEATURES).
@@ -439,6 +443,13 @@ spec:
   # The operator Ingress is disabled: exposure is handled by routes.yaml.
   ingress:
     enabled: false
+  # Traces (OpenTelemetry) sent to the collector of the platform (namespace rhbk-tracing).
+  # tracing.enabled is a BUILD-time option: it is set together with the image built with
+  # KC_TRACING_ENABLED=true (custom-rhbk/Containerfile). samplerRatio: share of traced requests.
+  tracing:
+    enabled: true          # build-time: matches the image (KC_TRACING_ENABLED)
+    endpoint: http://otel-collector.rhbk-tracing.svc.cluster.local:4317
+    samplerRatio: 1
   additionalOptions:
     - name: metrics-enabled
       value: "true"
@@ -771,6 +782,9 @@ Patch JSON 6902 (liste d'opérations) appliqué au CR Keycloak. La prod tourne a
     limits:
       cpu: "2"
       memory: "2250M"
+- op: replace
+  path: /spec/tracing/samplerRatio
+  value: 0.1
 ```
 
 ### 6.3 `overlays/prod/patch-routes.yaml`
@@ -1999,6 +2013,38 @@ analyse `| json | line_format "{{.message}}" | json`. Le **niveau** est déjà e
 normalisé (en minuscules) par le collecteur : une seule analyse suffit pour filtrer par
 niveau. `__error__=""` écarte les lignes non JSON (anciennes lignes, traces de pile
 coupées).
+
+### 15.10 Traces
+
+Keycloak envoie ses traces (OpenTelemetry, OTLP gRPC) au Collector de la plateforme
+(`otel-collector.rhbk-tracing`), qui les transmet à Tempo (`rhbk-platform`, Application
+`tracing`). Une trace suit une requête de bout en bout : requête HTTP, traitement Keycloak,
+requêtes SQL, avec la durée de chaque étape.
+
+**Où les voir** : console OpenShift, **Observe → Traces**, instance `rhbk-tracing / tempo`,
+tenant `rhbk`. Requêtes **TraceQL** utiles :
+
+| Besoin | Requête |
+|---|---|
+| Toutes les traces de la prod | `{resource.service.name="rhbk-prod"}` |
+| Requêtes HTTP de dev | `{resource.service.name="rhbk-dev" && span.http.request.method="POST"}` |
+| Demandes de jeton lentes (plus de 500 ms) | `{resource.service.name="rhbk-prod" && name=~".*/token" && duration > 500ms}` |
+| Requêtes en erreur | `{resource.service.name="rhbk-prod" && status = error}` |
+
+**Échantillonnage** : 100 % des requêtes en dev, **10 % en prod** (`spec.tracing.samplerRatio`,
+`overlays/prod/patch-keycloak.yaml`), pour limiter le volume.
+
+**Activer le traçage, dans l'ordre** (section 15.8) :
+
+1. commit d'options seul : `spec.tracing.endpoint` et `samplerRatio` (ignorés tant que
+   l'image n'a pas le traçage : simple avertissement « UNAVAILABLE ») ;
+2. commit d'image seul : rebuild avec `KC_TRACING_ENABLED=true`, nouveau digest, et
+   `spec.tracing.enabled: true` (option de build qui doit correspondre à l'image) ; recreate.
+
+Exemple observé : une demande de jeton pour un utilisateur inexistant dure environ 460 ms,
+dont l'essentiel dans `TokenEndpoint.processGrantRequest` alors que les requêtes SQL
+prennent moins de 1 ms : Keycloak calcule volontairement un hachage de mot de passe factice
+pour qu'on ne puisse pas deviner, à la durée de réponse, si un compte existe.
 
 ## 16. Dépannage
 
