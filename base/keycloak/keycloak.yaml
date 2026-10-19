@@ -65,6 +65,10 @@ spec:
     # Percentiles (p95, p99) of HTTP response times, used by the dashboards.
     - name: http-metrics-histograms-enabled
       value: "true"
+    # JSON console logs (runtime option): fields (level, loggerName, message...) can be filtered
+    # in Loki with the "| json" LogQL parser.
+    - name: log-console-output
+      value: json
   scheduling:
     affinity:
       podAntiAffinity:
