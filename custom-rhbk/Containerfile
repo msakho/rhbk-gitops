@@ -6,6 +6,7 @@ FROM registry.redhat.io/rhbk/keycloak-rhel9:26.6 AS builder
 # Grouped by observability part (docs/observabilite.md): keep only the lines of the parts you deploy.
 ENV KC_DB=postgres
 # [Observability part 1 - metrics and alerts] health probes and /metrics endpoint (port 9000).
+# Keep both lines in every image, even without observability: the operator probes use /health.
 ENV KC_HEALTH_ENABLED=true
 ENV KC_METRICS_ENABLED=true
 # [Observability part 2 - dashboards] user event metrics (logins, login errors, token issuance...

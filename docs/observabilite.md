@@ -6,6 +6,11 @@ n'importe quelle partie, ou ne déployer que certaines d'entre elles (voir les d
 Le contenu de chaque fichier est donné en entier : il est identique aux dépôts
 `rhbk-gitops` et `rhbk-platform`.
 
+**Point de départ** : le **socle** du guide principal (`docs/deploiement-gitops.md`, étapes 1
+à 13), c'est-à-dire Keycloak en prod et en dev sans observabilité. Chaque partie indique les
+lignes à **ajouter** à l'image et au CR Keycloak, et à quel endroit. Socle + 4 parties =
+dépôts actuels.
+
 Vue d'ensemble, pièges rencontrés et renvois : guide principal, **annexe D**
 (`docs/deploiement-gitops.md`). Utilisation au quotidien : sections 15.6 à 15.10 du guide.
 
@@ -42,7 +47,7 @@ Vue d'ensemble, pièges rencontrés et renvois : guide principal, **annexe D**
 
 | Prérequis | Pour | Vérification |
 |---|---|---|
-| Déploiement applicatif en place (guide principal, sections 1 à 13) | toutes | `oc get keycloak -A` |
+| Socle applicatif en place (guide principal, étapes 1 à 13) | toutes | `oc get keycloak -A` |
 | Plateforme `rhbk-platform` en place : bootstrap, ESO, Vault, opérateurs RHBK (README de `rhbk-platform`, étapes 1 à 6) | toutes | `oc get applications -n openshift-gitops` |
 | Stockage en bloc `ocs-storagecluster-ceph-rbd` | 1, 3, 4 | `oc get storageclass ocs-storagecluster-ceph-rbd` |
 | Stockage objet ODF / NooBaa (classe `openshift-storage.noobaa.io`) | 3, 4 | `oc get noobaa -n openshift-storage` |
@@ -88,8 +93,8 @@ Keycloak, PostgreSQL, ESO, Vault et ArgoCD ; notifications vers un récepteur de
 ### 1.1 Prérequis
 
 Aucune autre partie. Keycloak doit exposer ses métriques : options `KC_HEALTH_ENABLED` et
-`KC_METRICS_ENABLED` dans le Containerfile (repère `[Observability part 1]`, présentes depuis
-le premier build) et `metrics-enabled` dans le CR (étape 1.3).
+`KC_METRICS_ENABLED` dans le Containerfile (repère `[Observability part 1]`, déjà présentes
+dans l'image du socle : **pas de rebuild**) et `metrics-enabled` dans le CR (étape 1.3).
 
 ### 1.2 Plateforme : Application `platform-monitoring`
 
@@ -508,16 +513,25 @@ oc patch application platform-monitoring -n openshift-gitops --type merge -p '{"
 
 ### 1.3 Keycloak : alertes et option de métriques
 
-Option d'exécution dans `base/keycloak/keycloak.yaml` (`additionalOptions`) :
+Option d'exécution dans `base/keycloak/keycloak.yaml`, dans le bloc `additionalOptions`,
+placé **juste avant `scheduling:`**. Si le bloc n'existe pas encore (socle), ajouter aussi la
+ligne `additionalOptions:` :
 
 ```yaml
+  additionalOptions:
     # [Observability part 1 - metrics and alerts] /metrics endpoint.
     - name: metrics-enabled
       value: "true"
 ```
 
-Alertes Keycloak et PostgreSQL, à ajouter à `base/keycloak/kustomization.yaml`
-(`- prometheusrule.yaml`) :
+Alertes Keycloak et PostgreSQL : ajouter la ligne suivante à `base/keycloak/kustomization.yaml`,
+après `- routes.yaml` :
+
+```yaml
+  - prometheusrule.yaml
+```
+
+puis créer le fichier :
 
 `rhbk-gitops/base/keycloak/prometheusrule.yaml`
 ```yaml
@@ -615,6 +629,9 @@ spec:
 
 L'alerte `KeycloakDegraded` n'a d'intérêt qu'avec 2 replicas ou plus (section 15.8 du guide).
 
+Commit et push : dev se met à jour seul (rolling update), puis synchroniser la prod (section
+13.2 du guide).
+
 ### 1.4 Vérifier
 
 ```bash
@@ -651,28 +668,40 @@ planning*) et une vue d'ensemble RHBK dans la console (Perses).
 
 ### 2.2 Keycloak : métriques de connexions et percentiles
 
-Deux options **de build** dans `custom-rhbk/Containerfile` (repère `[Observability part 2]`) :
+**Commit 1, image.** Deux options **de build** dans `custom-rhbk/Containerfile`, juste après la
+ligne `ENV KC_METRICS_ENABLED=true` :
 
 ```dockerfile
+# [Observability part 2 - dashboards] user event metrics (logins, login errors, token issuance...
+# per realm): the feature AND event-metrics-user-enabled are build-time options. The CR declares
+# the same feature (spec.features).
 ENV KC_FEATURES=user-event-metrics
 ENV KC_EVENT_METRICS_USER_ENABLED=true
 ```
 
 Rebuild, push, nouveau digest (section 0.3). Dans `base/keycloak/keycloak.yaml`, **dans le
-même commit que le digest** (la fonctionnalité doit correspondre à l'image) :
+même commit que le digest** (la fonctionnalité doit correspondre à l'image), juste après
+`startOptimized: true` :
 
 ```yaml
+  # [Observability part 2 - dashboards] must match the features baked in the image
+  # (custom-rhbk/Containerfile, KC_FEATURES).
   features:
     enabled:
       - user-event-metrics
 ```
 
-Puis, **dans un commit séparé**, l'option d'exécution des percentiles (`additionalOptions`) :
+En prod, ce commit provoque un recreate (coupure d'environ 1 minute).
+
+**Commit 2, option d'exécution** des percentiles, dans `additionalOptions` (à la suite des
+options déjà présentes, avant `scheduling:`) :
 
 ```yaml
+    # [Observability part 2 - dashboards] percentiles (p95, p99) of HTTP response times.
     - name: http-metrics-histograms-enabled
       value: "true"
 ```
+
 
 Vérifier en dev : `keycloak_user_events_total` apparaît après une première connexion, et
 `http_server_requests_seconds_bucket` est présent (`oc exec ... curl` sur le port 9000, ou
@@ -2575,13 +2604,17 @@ oc patch application logging -n openshift-gitops --type merge -p '{"operation":{
 
 ### 3.4 Keycloak : logs JSON
 
-Option d'exécution dans `base/keycloak/keycloak.yaml` (`additionalOptions`, repère
-`[Observability part 3]`) : rolling update, sans rebuild.
+Option d'exécution dans `base/keycloak/keycloak.yaml`, dans `additionalOptions` (à la suite
+des options déjà présentes, avant `scheduling:` ; si le bloc n'existe pas encore, ajouter
+aussi la ligne `additionalOptions:`, comme à l'étape 1.3) : rolling update, sans rebuild.
 
 ```yaml
+    # [Observability part 3 - logs] JSON console logs (runtime option): fields (level, loggerName,
+    # message...) can be filtered in Loki with the "| json" LogQL parser.
     - name: log-console-output
       value: json
 ```
+
 
 ### 3.5 Vérifier
 
@@ -3188,16 +3221,20 @@ oc patch application tracing -n openshift-gitops --type merge -p '{"operation":{
 
 ### 4.4 Keycloak : traçage, en deux commits
 
-**Commit 1, options seules** (ignorées tant que l'image n'a pas le traçage) :
-`base/keycloak/keycloak.yaml`
+**Commit 1, options seules** (ignorées tant que l'image n'a pas le traçage) : dans
+`base/keycloak/keycloak.yaml`, juste après le bloc `ingress:` (`enabled: false`) :
 
 ```yaml
+  # [Observability part 4 - traces] OpenTelemetry traces sent to the collector of the platform
+  # (namespace rhbk-tracing).
+  # tracing.enabled is a BUILD-time option: it is set together with the image built with
+  # KC_TRACING_ENABLED=true (custom-rhbk/Containerfile). samplerRatio: share of traced requests.
   tracing:
     endpoint: http://otel-collector.rhbk-tracing.svc.cluster.local:4317
     samplerRatio: 1
 ```
 
-et, pour la prod, à la fin de `overlays/prod/patch-keycloak.yaml` :
+et, pour la prod (10 % des requêtes tracées), à la fin de `overlays/prod/patch-keycloak.yaml` :
 
 ```yaml
 - op: replace
@@ -3205,18 +3242,22 @@ et, pour la prod, à la fin de `overlays/prod/patch-keycloak.yaml` :
   value: 0.1
 ```
 
-**Commit 2, image** : dans `custom-rhbk/Containerfile` (repère `[Observability part 4]`) :
+**Commit 2, image** : dans `custom-rhbk/Containerfile`, après les autres lignes `ENV`
+(juste avant la ligne vide qui précède `WORKDIR`) :
 
 ```dockerfile
+# [Observability part 4 - traces] OpenTelemetry tracing: build-time option. Endpoint and sampler
+# ratio are runtime options (spec.tracing in the Keycloak CR).
 ENV KC_TRACING_ENABLED=true
 ```
 
-Rebuild, push, nouveau digest (section 0.3), et dans le même commit, dans le CR :
+Rebuild, push, nouveau digest (section 0.3), et dans le même commit, dans le CR, juste sous
+la ligne `tracing:` :
 
 ```yaml
-  tracing:
     enabled: true          # build-time: matches the image (KC_TRACING_ENABLED)
 ```
+
 
 En prod, ce commit provoque un recreate (coupure d'environ 1 minute).
 
@@ -3246,9 +3287,9 @@ Les 4 parties sont en place.
 | Étape | Faire | Ne pas faire |
 |---|---|---|
 | Plateforme | 1.2 (`platform-monitoring`), 2.3 (`grafana-operator`, `grafana`), 2.4 (`coo-operator`, `observability-console`) | 3.2, 3.3, 4.2, 4.3 |
-| Containerfile | garder `[Observability part 1]` et `[Observability part 2]` | retirer la ligne `KC_TRACING_ENABLED` (`[Observability part 4]`) |
+| Containerfile | lignes `[Observability part 2]` (2.2), en plus des lignes `[Observability part 1]` du socle | pas de `KC_TRACING_ENABLED` (partie 4) |
 | CR Keycloak | `metrics-enabled`, `prometheusrule.yaml` (1.3) ; `features`, `http-metrics-histograms-enabled` (2.2) | pas de bloc `tracing` (partie 4), pas de `log-console-output` (partie 3) |
-| Overlay prod | — | pas de patch `samplerRatio` |
+| Overlay prod | — | pas de patch `samplerRatio` (partie 4) |
 | AppProject et `argocd/kustomization.yaml` | entrées des parties 1 et 2 | entrées des parties 3 et 4 |
 
 Les parties 3 et 4 pourront être ajoutées plus tard, dans n'importe quel ordre, sans toucher

@@ -10,10 +10,9 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   instances: 1
-  # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
-  # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
-  # features=user-event-metrics, event-metrics-user-enabled, tracing-enabled.
-  # Observability options are tagged by part below (docs/observabilite.md).
+  # Custom optimized image (custom-rhbk/Containerfile), pinned by digest: build-time options
+  # are baked in the image. Observability options are tagged [Observability part N] below
+  # (docs/observabilite.md).
   image: quay.io/msakho0/mskeycloak:26.6@sha256:33e17c25d6cc2c8a44fe70f7126fb3165ff9be56a56099b350135656ddd801cc
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true

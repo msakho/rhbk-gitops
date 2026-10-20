@@ -7,34 +7,40 @@ pour deux environnements : **prod** et **dev**.
 Il couvre **uniquement la partie applicative**. Les namespaces, l'opérateur RHBK,
 External Secrets Operator (ESO) et Vault sont gérés par les administrateurs dans un
 second dépôt GitOps, [`rhbk-platform`](https://github.com/msakho/rhbk-platform), décrit dans son README et dans
-l'annexe A (section 17). La base PostgreSQL (annexe B) et le certificat (annexe C)
-sont créés à la main. Tout cela forme les prérequis de la section 2.
+l'annexe A (section 17).
 
 | Dépôt | Contenu | Droits ArgoCD |
 |---|---|---|
 | `rhbk-platform` (administrateurs) | namespaces, opérateurs RHBK et ESO, configuration ESO, `ClusterSecretStore`, Vault | ressources cluster autorisées |
-| `rhbk-gitops` (ce guide) | CR Keycloak, routes, ExternalSecrets | **aucune** ressource cluster |
+| `rhbk-gitops` (ce guide) | image Keycloak, CR Keycloak, routes, ExternalSecrets | **aucune** ressource cluster |
 
-En suivant ce guide dans un dépôt vide, on obtient exactement le dépôt
-`https://github.com/msakho/rhbk-gitops`.
+**Comment lire ce guide.** Les sections 2 à 13 sont des **étapes**, à faire dans l'ordre.
+Chacune donne son objectif, les actions, une vérification et le résultat attendu. À la fin
+de l'étape 13, le **socle** tourne : Keycloak en prod et en dev, sans observabilité.
+L'observabilité s'ajoute ensuite, partie par partie, avec
+[`docs/observabilite.md`](observabilite.md). Les sections 14 à 16 servent à l'exploitation,
+les annexes A à D détaillent la plateforme, la base, le certificat et l'observabilité.
+
+En suivant les étapes 1 à 13 puis les 4 parties d'`observabilite.md` dans un dépôt vide, on
+obtient exactement le dépôt `https://github.com/msakho/rhbk-gitops`.
 
 ---
 
 ## Sommaire
 
 1. [Principes](#1-principes)
-2. [Prérequis](#2-prérequis)
-3. [Valeurs à adapter](#3-valeurs-à-adapter)
-4. [Créer le dépôt et l'arborescence](#4-créer-le-dépôt-et-larborescence)
-5. [La base Kustomize (`base/keycloak`)](#5-la-base-kustomize-basekeycloak)
-6. [Les overlays prod et dev](#6-les-overlays-prod-et-dev)
-7. [Les ExternalSecrets (secrets depuis Vault)](#7-les-externalsecrets-secrets-depuis-vault)
-8. [La configuration ArgoCD](#8-la-configuration-argocd)
-9. [Valider en local](#9-valider-en-local)
-10. [Pousser le dépôt](#10-pousser-le-dépôt)
-11. [Bootstrap ArgoCD](#11-bootstrap-argocd)
-12. [Synchroniser dev puis prod](#12-synchroniser-dev-puis-prod)
-13. [Tester le déploiement](#13-tester-le-déploiement)
+2. [Étape : prérequis et valeurs à adapter](#2-étape--prérequis-et-valeurs-à-adapter)
+3. [Étape : créer le dépôt et l'arborescence](#3-étape--créer-le-dépôt-et-larborescence)
+4. [Étape : certificat de chaque environnement](#4-étape--certificat-de-chaque-environnement)
+5. [Étape : valeurs dans Vault](#5-étape--valeurs-dans-vault)
+6. [Étape : base PostgreSQL](#6-étape--base-postgresql)
+7. [Étape : construire l'image Keycloak](#7-étape--construire-limage-keycloak)
+8. [Étape : la base Kustomize (`base/keycloak`)](#8-étape--la-base-kustomize-basekeycloak)
+9. [Étape : les overlays prod et dev](#9-étape--les-overlays-prod-et-dev)
+10. [Étape : les ExternalSecrets (secrets depuis Vault)](#10-étape--les-externalsecrets-secrets-depuis-vault)
+11. [Étape : la configuration ArgoCD](#11-étape--la-configuration-argocd)
+12. [Étape : valider, pousser et lancer ArgoCD](#12-étape--valider-pousser-et-lancer-argocd)
+13. [Étape : synchroniser et tester](#13-étape--synchroniser-et-tester)
 14. [Rejouer l'exercice sur le même cluster](#14-rejouer-lexercice-sur-le-même-cluster)
 15. [Exploitation courante](#15-exploitation-courante)
 16. [Dépannage](#16-dépannage)
@@ -42,6 +48,20 @@ En suivant ce guide dans un dépôt vide, on obtient exactement le dépôt
 18. [Annexe B : créer la base PostgreSQL d'un environnement](#18-annexe-b--créer-la-base-postgresql-dun-environnement)
 19. [Annexe C : générer le certificat d'un environnement](#19-annexe-c--générer-le-certificat-dun-environnement)
 20. [Annexe D : observabilité (vue d'ensemble)](#20-annexe-d--observabilité-vue-densemble)
+
+### Les étapes en un coup d'œil
+
+| Étape | Où | Résultat |
+|---|---|---|
+| 2. Prérequis | cluster, poste de travail | plateforme prête, outils installés, valeurs choisies |
+| 3. Dépôt | GitHub, poste | dépôt local avec son arborescence et son `.gitignore` |
+| 4. Certificat | poste (acme.sh, annexe C) | un certificat par environnement dans `cert/` |
+| 5. Vault | pod Vault (annexe A.7) | `secret/rhbk/<env>/db`, `bootstrap-admin`, `tls` |
+| 6. PostgreSQL | namespace de l'environnement (annexe B) | Service `postgres-db` prêt |
+| 7. Image | poste (podman) | image optimisée sur quay.io, **digest** noté |
+| 8 à 11. Fichiers du dépôt | poste | base, overlays, ExternalSecrets, ArgoCD : dépôt complet en local |
+| 12. Valider, pousser, ArgoCD | poste, GitHub, cluster | Applications `rhbk-root`, `rhbk-dev`, `rhbk-prod` créées |
+| 13. Synchroniser et tester | ArgoCD, navigateur | Keycloak dev et prod en ligne, console isolée |
 
 ---
 
@@ -67,9 +87,9 @@ changer une image…
 ### 1.2 Kustomize : base + overlays
 
 - `base/keycloak/` contient les manifestes **communs**, avec des valeurs factices
-  (`KEYCLOAK_NAME`, `HOST_PLACEHOLDER`…) qui ne sont jamais déployées telles quelles.
+  (`KEYCLOAK_NAME`, `HOSTNAME_PLACEHOLDER`…) qui ne sont jamais déployées telles quelles.
 - `overlays/prod/` et `overlays/dev/` fixent ce qui change par environnement :
-  namespace, nom de l'instance, hostnames, ressources CPU/mémoire.
+  namespace, nom de l'instance, hostnames, nombre de pods, ressources CPU/mémoire.
 
 Kustomize assemble base + overlay au moment où ArgoCD lit le dépôt.
 
@@ -84,8 +104,10 @@ Kustomize assemble base + overlay au moment où ArgoCD lit le dépôt.
 | `Route rhbk-public-realms` | Hostname public, chemin `/realms` uniquement. |
 | `Route rhbk-public-resources` | Hostname public, chemin `/resources` uniquement. |
 | `Route rhbk-admin` | Hostname admin, tous les chemins (console). |
-| `PodDisruptionBudget keycloak` | Garde au moins un pod pendant les drainages de nœuds (section 5.7). |
-| `PrometheusRule keycloak-alerts` | Alertes Keycloak et PostgreSQL de l'environnement (section 5.6). |
+| `PodDisruptionBudget keycloak` | Garde au moins un pod pendant les drainages de nœuds (section 8.6). |
+
+L'observabilité ajoute ensuite une `PrometheusRule` (alertes) et des options au CR
+(`observabilite.md`).
 
 ### 1.4 Isolation de la console admin
 
@@ -116,52 +138,63 @@ il ferait une route passthrough qui exposerait tous les chemins.
 | Wave | Ressources | Pourquoi |
 |---|---|---|
 | 0 | Service `rhbk-internal`, Role, RoleBinding, ExternalSecrets | Le certificat interne, le droit du routeur et les secrets doivent exister avant Keycloak et les routes. |
-| 1 | CR Keycloak | Démarre avec `rhbk-internal-tls`. |
+| 1 | CR Keycloak, PodDisruptionBudget | Keycloak démarre avec `rhbk-internal-tls`. |
 | 2 | Routes | La validation de `externalCertificate` exige le RoleBinding ; ArgoCD attend que Keycloak soit **Healthy** avant cette wave. |
+
+### 1.6 Image optimisée : options de build et options d'exécution
+
+Keycloak tourne avec une **image construite par nos soins** (étape 7), dite *optimisée* :
+`kc.sh build` y fige à l'avance les **options de build** (base de données, sondes,
+métriques, fonctionnalités…), et l'opérateur la démarre en `--optimized`, sans étape de
+build au démarrage. Conséquences :
+
+- une option **de build** se règle dans le Containerfile (`ENV KC_…`), et tout changement
+  impose un nouveau build et un nouveau **digest** dans le CR ;
+- une option **d'exécution** se règle dans le CR (`additionalOptions`) ;
+- si le CR demande une option de build différente de l'image, **Keycloak refuse de
+  démarrer** (section 15.1).
 
 ---
 
-## 2. Prérequis
+## 2. Étape : prérequis et valeurs à adapter
 
-Ces éléments **ne sont pas gérés par le dépôt**. Vérifie-les avant de commencer.
+**Objectif** : vérifier que la plateforme est prête, installer les outils, choisir les
+valeurs propres à ton cluster.
 
-| # | Prérequis | Commande de vérification |
+### 2.1 Ce que fournit la plateforme (`rhbk-platform`)
+
+Ces éléments **ne sont pas gérés par ce dépôt** : ils sont déployés par le dépôt
+`rhbk-platform` (README de `rhbk-platform`, étapes 1 à 6, et annexe A). Vérifie-les :
+
+| # | Prérequis | Vérification |
 |---|---|---|
 | 1 | OpenShift 4.16+ (pour `externalCertificate` sur les Routes) — testé en 4.20 | `oc version` |
 | 2 | OpenShift GitOps installé, instance `openshift-gitops` | `oc get argocd -n openshift-gitops` |
-| 3 | Namespaces `rhbk` et `rhbk-dev` (créés par `rhbk-platform`) | `oc get ns rhbk rhbk-dev` |
-| 4 | Opérateur RHBK installé **dans chaque namespace** par `rhbk-platform` (canal `stable-v26.6`). Il ne supporte que OwnNamespace/SingleNamespace. | `oc get csv -n rhbk-dev \| grep rhbk` → `Succeeded` |
-| 5 | PostgreSQL dans chaque namespace : Service **`postgres-db`** port 5432, base **`rhbk`** (annexe B) | `oc get svc postgres-db -n rhbk-dev` |
-| 6 | External Secrets Operator démarré et `ClusterSecretStore vault-store` valide (`rhbk-platform`, annexe A) | `oc get clustersecretstore vault-store` → `Valid`, `READY True` |
-| 7 | Valeurs rangées dans Vault pour l'environnement : `secret/rhbk/<env>/db` (`username`, `password`), `secret/rhbk/<env>/bootstrap-admin` (`username`, `password`), `secret/rhbk/<env>/tls` (`tls.crt` = fullchain, `tls.key`) | `oc exec -n vault vault-0 -- vault kv list -mount=secret rhbk/dev` (avec un token, voir annexe A.5) |
-| 8 | Certificat (`tls.crt`) couvrant les hostnames public et admin de l'environnement | voir ci-dessous |
-| 9 | Image Keycloak optimisée publiée (voir `custom-rhbk/Containerfile`), avec `KC_DB=postgres`, `KC_HEALTH_ENABLED=true`, `KC_METRICS_ENABLED=true` | `oc image info <image>` |
-| 10 | ArgoCD a les droits sur les namespaces cibles | `oc auth can-i create keycloaks.k8s.keycloak.org -n rhbk-dev --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller` → `yes` |
-| 11 | Outils locaux : `oc` (même version que le cluster), `git`, accès en écriture au dépôt GitHub | `oc version`, `git --version` |
-| 12 | Surveillance des projets utilisateur activée (`rhbk-platform`, Application `platform-monitoring`) | `oc get pods -n openshift-user-workload-monitoring` : `prometheus-user-workload-*` et `thanos-ruler-user-workload-*` en `Running` |
+| 3 | Namespaces `rhbk` et `rhbk-dev` | `oc get ns rhbk rhbk-dev` |
+| 4 | Opérateur RHBK installé **dans chaque namespace** (canal `stable-v26.6`). Il ne supporte que OwnNamespace/SingleNamespace. | `oc get csv -n rhbk-dev \| grep rhbk` → `Succeeded` |
+| 5 | External Secrets Operator démarré et `ClusterSecretStore vault-store` valide ; Vault initialisé et descellé (annexe A.4 à A.6) | `oc get clustersecretstore vault-store` → `Valid`, `READY True` |
+| 6 | ArgoCD a les droits sur les namespaces cibles | `oc auth can-i create keycloaks.k8s.keycloak.org -n rhbk-dev --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller` → `yes` |
+| 7 | Stockage en bloc pour la base PostgreSQL | `oc get storageclass ocs-storagecluster-ceph-rbd` |
 
-Pour vérifier le certificat (prérequis 8), sur le fichier avant de le ranger dans
-Vault :
-
-```bash
-openssl x509 -in rhbk.fullchain.pem -noout -text | grep DNS:
-```
-
-Ou, une fois l'environnement déployé, sur le Secret créé par ESO :
-
-```bash
-oc get secret rhbk-tls-secret -n rhbk-dev -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -text | grep DNS:
-```
-
-Les hostnames public et admin de l'environnement (section 3) doivent apparaître.
-
-> **Si le prérequis 10 répond `no`**, vérifie que le namespace porte le label
+> **Si le prérequis 6 répond `no`**, vérifie que le namespace porte le label
 > `argocd.argoproj.io/managed-by=openshift-gitops` : il est posé par `rhbk-platform`
 > (`operators/rhbk/base/namespace.yaml`).
 
----
+### 2.2 Outils et accès sur le poste de travail
 
-## 3. Valeurs à adapter
+| Outil ou accès | Pour | Vérification |
+|---|---|---|
+| `oc` (même version que le cluster), connecté au cluster | toutes les étapes | `oc version`, `oc whoami` |
+| `git` et accès en écriture à un dépôt GitHub (CLI `gh` conseillée) | étapes 3 et 8 à 12 | `git --version`, `gh auth status` |
+| `podman` | étape 7 | `podman --version` |
+| Compte Red Hat (lecture de `registry.redhat.io`) | étape 7 | `podman login registry.redhat.io` |
+| Compte quay.io et dépôt d'images (ici `quay.io/msakho0/mskeycloak`, **public**) | étape 7 | `podman login quay.io` |
+| `openssl`, `python3`, acme.sh et une clé AWS Route 53 | étapes 4 et 5 | annexe C.1 |
+
+Si le dépôt quay.io est **privé**, le cluster doit recevoir un pull secret pour cette image
+(`spec.imagePullSecrets` du CR) : ce guide suppose un dépôt public.
+
+### 2.3 Valeurs à adapter
 
 Le guide utilise les valeurs du déploiement de référence. Pour un autre cluster ou
 un autre dépôt, remplace-les partout.
@@ -176,7 +209,7 @@ un autre dépôt, remplace-les partout.
 | Hostname public dev | `dev-rhbk.<domaine>` | `overlays/dev/patch-keycloak.yaml`, `patch-routes.yaml` |
 | Hostname admin dev | `dev-rhbk-admin.<domaine>` | `overlays/dev/patch-keycloak.yaml`, `patch-route-admin.yaml` |
 | Namespaces | `rhbk` (prod), `rhbk-dev` (dev) | `overlays/*/kustomization.yaml`, `argocd/` |
-| Image | `quay.io/msakho0/mskeycloak:26.6@sha256:b5c7…` | `base/keycloak/keycloak.yaml` |
+| Image | `quay.io/msakho0/mskeycloak:26.6` + digest de l'étape 7 | `base/keycloak/keycloak.yaml` |
 | ClusterSecretStore | `vault-store` | `overlays/*/external-secrets/*.yaml` |
 | Chemins Vault | `rhbk/prod/...`, `rhbk/dev/...` | `overlays/*/external-secrets/*.yaml` |
 
@@ -188,17 +221,21 @@ grep -rl 'apps.cluster-nnljw.nnljw.sandbox742.opentlc.com' overlays | xargs sed 
 
 (Sur Linux, remplacer `sed -i ''` par `sed -i`.)
 
+**Résultat** : les vérifications des tableaux 2.1 et 2.2 passent, et tu connais tes valeurs.
+
 ---
 
-## 4. Créer le dépôt et l'arborescence
+## 3. Étape : créer le dépôt et l'arborescence
 
-### 4.1 Créer le dépôt sur GitHub
+**Objectif** : un dépôt git local avec son arborescence, protégé contre l'ajout de secrets.
+
+### 3.1 Créer le dépôt sur GitHub
 
 Crée un dépôt vide (sans README ni .gitignore) sur GitHub, par exemple
 `rhbk-gitops-v2`. S'il est **public**, ArgoCD le lit sans identifiants. S'il est
-**privé**, il faudra le déclarer dans ArgoCD (section 10.2).
+**privé**, il faudra le déclarer dans ArgoCD (étape 12.3).
 
-### 4.2 Créer l'arborescence locale
+### 3.2 Créer l'arborescence locale
 
 ```bash
 mkdir -p ~/rhbk-gitops-v2 && cd ~/rhbk-gitops-v2
@@ -208,7 +245,7 @@ mkdir -p ~/rhbk-gitops-v2 && cd ~/rhbk-gitops-v2
 mkdir -p bootstrap argocd/applications base/keycloak overlays/prod/external-secrets overlays/dev/external-secrets custom-rhbk docs tools/postgresql
 ```
 
-Arborescence cible :
+Arborescence cible du socle :
 
 ```
 .gitignore
@@ -228,7 +265,6 @@ base/
     router-secret-reader-rbac.yaml
     keycloak.yaml
     routes.yaml
-    prometheusrule.yaml
     poddisruptionbudget.yaml
 overlays/
   prod/
@@ -244,14 +280,16 @@ overlays/
   dev/
     (mêmes fichiers que prod)
 custom-rhbk/
-  Containerfile
+  Containerfile              étape 7
 tools/
   postgresql/                hors ArgoCD : base d'un environnement (annexe B)
 docs/
   deploiement-gitops.md
 ```
 
-### 4.3 `.gitignore`
+L'observabilité ajoutera `base/keycloak/prometheusrule.yaml` (partie 1).
+
+### 3.3 `.gitignore`
 
 **À créer en premier**, avant tout `git add`, pour qu'aucune clé ni aucun certificat
 ne parte dans le dépôt.
@@ -269,12 +307,194 @@ cert/
 vault-init.json
 ```
 
+**Résultat** : arborescence vide créée, `.gitignore` en place.
+
 ---
 
-## 5. La base Kustomize (`base/keycloak`)
+## 4. Étape : certificat de chaque environnement
 
-### 5.1 `base/keycloak/kustomization.yaml`
+**Objectif** : un certificat Let's Encrypt par environnement, couvrant ses deux hostnames
+(public et admin). Le routeur le présentera aux navigateurs.
 
+**Actions** : suivre l'**annexe C** (C.1 à C.5) avec `ENV=dev`, puis avec `ENV=prod`. Les
+fichiers sont écrits dans `cert/`, dossier ignoré par git (`.gitignore`, étape 3.3). Dans les
+commandes de l'annexe, remplace `/usr/local/dev/rhbk-gitops` par le dossier de ton dépôt.
+
+**Vérifier** : les deux hostnames de l'environnement et la date d'expiration :
+
+```bash
+openssl x509 -in cert/dev-rhbk.fullchain.pem -noout -text | grep -E 'DNS:|Not After'
+```
+
+**Résultat** : `cert/<env>-rhbk.fullchain.pem` et `cert/<env>-rhbk.key.pem` pour dev et prod.
+
+---
+
+## 5. Étape : valeurs dans Vault
+
+**Objectif** : ranger dans Vault, pour chaque environnement, les trois valeurs que Keycloak
+lira par ESO (étape 10). Aucune n'est écrite dans git.
+
+| Chemin Vault | Clés | Contenu |
+|---|---|---|
+| `secret/rhbk/<env>/db` | `username`, `password` | identifiants de la base ; pour une base neuve, à choisir librement : l'étape 6 crée la base **avec** ces valeurs |
+| `secret/rhbk/<env>/bootstrap-admin` | `username`, `password` | admin temporaire du premier démarrage de Keycloak |
+| `secret/rhbk/<env>/tls` | `tls.crt` (fullchain), `tls.key` | certificat de l'étape 4 |
+
+**Actions** : suivre l'**annexe A.7** avec `ENV=dev`, puis avec `ENV=prod`. Les valeurs
+sont saisies sans affichage. Les variables `CERT` et `KEY` pointent vers les fichiers de
+l'étape 4, dans le `cert/` de ton dépôt.
+
+**Vérifier** : la commande de fin de l'annexe A.7 liste `bootstrap-admin`, `db` et `tls`.
+
+**Résultat** : trois entrées par environnement dans Vault.
+
+---
+
+## 6. Étape : base PostgreSQL
+
+**Objectif** : une base PostgreSQL par environnement, joignable par Keycloak sous le nom
+**`postgres-db:5432`**, base **`rhbk`**. Elle n'est pas gérée par ArgoCD : ses manifestes
+sont dans `tools/postgresql/` et s'appliquent à la main.
+
+**Actions** :
+
+1. Créer dans `tools/postgresql/` les 4 fichiers de l'**annexe B.2** (ils font partie du
+   dépôt, mais ArgoCD ne les lit pas).
+2. Depuis le dossier du dépôt, appliquer l'**annexe B.3** avec `ENV=dev`, puis avec
+   `ENV=prod`. Le mot de passe de la base est lu dans Vault (étape 5) : rien à saisir.
+
+**Vérifier** (annexe B.4) :
+
+```bash
+oc get svc postgres-db -n rhbk-dev && oc rollout status deploy/postgres-db -n rhbk-dev
+```
+
+**Résultat** : Deployment `postgres-db` prêt dans `rhbk` et `rhbk-dev`.
+
+---
+
+## 7. Étape : construire l'image Keycloak
+
+**Objectif** : une image Keycloak optimisée (section 1.6), publiée sur quay.io, et son
+**digest**, qui fige la version déployée dans le CR (étape 8.4).
+
+### 7.1 Le Containerfile
+
+Dans le dépôt local (étape 3), crée le fichier `custom-rhbk/Containerfile`. Il construit
+l'image en deux temps : l'étage `builder` lance `kc.sh build` avec les options de build,
+puis l'image finale ne copie que le résultat. Les commandes des étapes 7.3 à 7.5 se lancent
+depuis le dossier du dépôt.
+
+| Option de build | Pourquoi |
+|---|---|
+| `KC_DB=postgres` | pilote de base de données figé dans l'image |
+| `KC_HEALTH_ENABLED=true` | sondes `/health` utilisées par l'opérateur : **obligatoire** |
+| `KC_METRICS_ENABLED=true` | point `/metrics` (port 9000), prêt pour la partie 1 de l'observabilité |
+
+Les options repérées `[Observability part N]` s'ajoutent avec `observabilite.md` (parties 2
+et 4). Les lignes commentées montrent où ajouter un thème ou un provider (JAR).
+
+`custom-rhbk/Containerfile`
+```dockerfile
+FROM registry.redhat.io/rhbk/keycloak-rhel9:26.6 AS builder
+
+# Build-time options: they are baked into the optimized image and must match the
+# Keycloak CR (base/keycloak/keycloak.yaml), since the operator starts a custom image with --optimized.
+# An optimized image refuses to start if the CR asks for a different value of a build-time option.
+# Grouped by observability part (docs/observabilite.md): keep only the lines of the parts you deploy.
+ENV KC_DB=postgres
+# [Observability part 1 - metrics and alerts] health probes and /metrics endpoint (port 9000).
+# Keep both lines in every image, even without observability: the operator probes use /health.
+ENV KC_HEALTH_ENABLED=true
+ENV KC_METRICS_ENABLED=true
+
+WORKDIR /opt/keycloak
+
+# Enable custom theme.
+# COPY ./themes/my-theme/ /opt/keycloak/themes/my-theme
+
+# Add the provider JAR file to the providers directory
+# ADD --chown=keycloak:keycloak --chmod=644 <MY_PROVIDER_JAR_URL> /opt/keycloak/providers/myprovider.jar
+
+RUN /opt/keycloak/bin/kc.sh build
+
+
+FROM registry.redhat.io/rhbk/keycloak-rhel9:26.6
+COPY --from=builder /opt/keycloak/ /opt/keycloak/
+
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+```
+
+### 7.2 Se connecter aux registres
+
+L'image de base vient de `registry.redhat.io` (compte Red Hat) ; l'image construite part
+sur quay.io :
+
+```bash
+podman login registry.redhat.io
+```
+
+```bash
+podman login quay.io
+```
+
+### 7.3 Construire et pousser
+
+`--platform linux/amd64` : les nœuds du cluster sont en x86_64, alors qu'un Mac récent est
+en ARM. Le tag `26.6` de l'image de base pointe toujours sur la **dernière 26.6.x** publiée
+par Red Hat.
+
+```bash
+podman build --platform linux/amd64 -t quay.io/msakho0/mskeycloak:26.6 -f custom-rhbk/Containerfile custom-rhbk
+```
+
+```bash
+podman push quay.io/msakho0/mskeycloak:26.6
+```
+
+### 7.4 Récupérer le digest
+
+```bash
+oc image info quay.io/msakho0/mskeycloak:26.6 | grep Digest
+```
+
+Note la valeur `sha256:…` : elle va dans `image:` du CR (étape 8.4). Le tag `26.6` est
+réécrit à chaque build ; le **digest** désigne une image précise, qui ne change jamais. Avec
+lui, ArgoCD déploie exactement l'image testée, et un nouveau build ne change rien tant que
+le digest du CR n'est pas mis à jour.
+
+### 7.5 Vérifier
+
+Les options figées dans l'image (marquées `Persisted`) :
+
+```bash
+podman run --rm --platform linux/amd64 quay.io/msakho0/mskeycloak:26.6 show-config | grep Persisted
+```
+
+Résultat attendu pour le socle : `kc.db = postgres`, `kc.health-enabled = true`,
+`kc.metrics-enabled = true`, `kc.optimized = true`. La version de Keycloak contenue dans
+l'image :
+
+```bash
+podman run --rm --platform linux/amd64 --entrypoint cat quay.io/msakho0/mskeycloak:26.6 /opt/keycloak/version.txt
+```
+
+**Résultat** : image publiée sur quay.io, digest noté.
+
+Pour reconstruire l'image plus tard (nouvelle version 26.6.x, nouvelle option de build) :
+section 15.1.
+
+---
+
+## 8. Étape : la base Kustomize (`base/keycloak`)
+
+**Objectif** : les manifestes communs aux deux environnements, avec des valeurs factices
+que les overlays remplacent (étape 9).
+
+### 8.1 `base/keycloak/kustomization.yaml`
+
+`base/keycloak/kustomization.yaml`
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -283,11 +503,10 @@ resources:
   - router-secret-reader-rbac.yaml
   - keycloak.yaml
   - routes.yaml
-  - prometheusrule.yaml
   - poddisruptionbudget.yaml
 ```
 
-### 5.2 `base/keycloak/internal-svc.yaml`
+### 8.2 `base/keycloak/internal-svc.yaml`
 
 Service interne. L'annotation `service.beta.openshift.io/serving-cert-secret-name`
 demande au service-ca d'OpenShift de générer un certificat pour
@@ -296,6 +515,7 @@ demande au service-ca d'OpenShift de générer un certificat pour
 On ne peut pas réutiliser le Service `rhbk-<env>-service` créé par l'opérateur :
 l'opérateur le gère et retirerait l'annotation.
 
+`base/keycloak/internal-svc.yaml`
 ```yaml
 # Internal Service: the OpenShift service-ca generates a certificate for
 # rhbk-internal.<namespace>.svc in the rhbk-internal-tls secret.
@@ -321,13 +541,14 @@ spec:
       protocol: TCP
 ```
 
-### 5.3 `base/keycloak/router-secret-reader-rbac.yaml`
+### 8.3 `base/keycloak/router-secret-reader-rbac.yaml`
 
 Le routeur (ServiceAccount `router` du namespace `openshift-ingress`) doit pouvoir
 lire `rhbk-tls-secret` pour utiliser `externalCertificate`. Sans ce droit, l'API
 refuse la création des routes (`Forbidden: router serviceaccount does not have
 permission to get this secret`).
 
+`base/keycloak/router-secret-reader-rbac.yaml`
 ```yaml
 # Allows the router to read the Let's Encrypt certificate (spec.tls.externalCertificate).
 apiVersion: rbac.authorization.k8s.io/v1
@@ -358,30 +579,28 @@ subjects:
     namespace: openshift-ingress
 ```
 
-### 5.4 `base/keycloak/keycloak.yaml`
+### 8.4 `base/keycloak/keycloak.yaml`
 
 Le CR Keycloak. Points clés :
 
 - `SkipDryRunOnMissingResource=true` : si l'opérateur (donc la CRD) manque, ArgoCD
   donne une erreur claire au lieu d'échouer au dry-run de toute l'Application.
-- `image` figée par **digest** : ArgoCD déploie toujours exactement cette image.
+- `image` : l'image de l'étape 7, **avec son digest** (remplace `<DIGEST>` par la valeur
+  notée à l'étape 7.4, `sha256:…`).
 - `startOptimized: true` : l'image est déjà construite (`kc.sh build`), Keycloak
-  démarre en `--optimized`. Les options de build de l'image doivent correspondre au CR.
-- `features: user-event-metrics` : déclare la fonctionnalité figée dans l'image.
-- `additionalOptions` : options **d'exécution** seulement (`metrics-enabled`,
-  `http-metrics-histograms-enabled` pour les percentiles de temps de réponse,
-  `log-console-output: json` pour des logs exploitables dans Loki, section 15.9).
-  `event-metrics-user-enabled` (métriques de connexions par realm) est une option **de
-  build** : elle est dans le Containerfile, pas ici.
-- `tracing` : envoi des traces OpenTelemetry au Collector de la plateforme
-  (`rhbk-tracing`, section 15.10). `endpoint` et `samplerRatio` sont des options
-  d'exécution ; `enabled` est une option **de build** et doit correspondre à l'image
-  (`KC_TRACING_ENABLED` dans le Containerfile).
+  démarre en `--optimized`. Les options de build de l'image doivent correspondre au CR
+  (section 1.6).
+- `bootstrapAdmin` : admin temporaire, utilisé seulement au premier démarrage (base vide).
+- `hostname.strict: true` : les URL ne sont pas déduites des en-têtes des requêtes.
 - `db.host: postgres-db` : nom court, résolu dans le namespace de l'instance ;
   le même CR fonctionne dans les deux environnements.
-- `http.tlsSecret: rhbk-internal-tls` : le certificat interne de la section 5.2.
+- `http.tlsSecret: rhbk-internal-tls` : le certificat interne de la section 8.2.
 - `ingress.enabled: false` : l'exposition est faite par `routes.yaml`.
+- `scheduling` : anti-affinité, pour placer les pods de prod sur des nœuds différents.
+- Les options d'observabilité (`features`, `tracing`, `additionalOptions`) s'ajoutent avec
+  `observabilite.md`, aux places indiquées par chaque partie.
 
+`base/keycloak/keycloak.yaml`
 ```yaml
 apiVersion: k8s.keycloak.org/v2beta1
 kind: Keycloak
@@ -395,18 +614,12 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   instances: 1
-  # Custom optimized image (custom-rhbk/Containerfile), pinned by digest.
-  # Build-time options baked in the image: db=postgres, health-enabled, metrics-enabled,
-  # features=user-event-metrics, event-metrics-user-enabled, tracing-enabled.
-  # Observability options are tagged by part below (docs/observabilite.md).
-  image: quay.io/msakho0/mskeycloak:26.6@sha256:33e17c25d6cc2c8a44fe70f7126fb3165ff9be56a56099b350135656ddd801cc
+  # Custom optimized image (custom-rhbk/Containerfile), pinned by digest: build-time options
+  # are baked in the image. Observability options are tagged [Observability part N] below
+  # (docs/observabilite.md).
+  image: quay.io/msakho0/mskeycloak:26.6@<DIGEST>
   # The operator starts the image with --optimized (no build step at startup).
   startOptimized: true
-  # [Observability part 2 - dashboards] must match the features baked in the image
-  # (custom-rhbk/Containerfile, KC_FEATURES).
-  features:
-    enabled:
-      - user-event-metrics
   # Only used on first start (empty database) to create the temporary admin.
   bootstrapAdmin:
     user:
@@ -446,25 +659,6 @@ spec:
   # The operator Ingress is disabled: exposure is handled by routes.yaml.
   ingress:
     enabled: false
-  # [Observability part 4 - traces] OpenTelemetry traces sent to the collector of the platform
-  # (namespace rhbk-tracing).
-  # tracing.enabled is a BUILD-time option: it is set together with the image built with
-  # KC_TRACING_ENABLED=true (custom-rhbk/Containerfile). samplerRatio: share of traced requests.
-  tracing:
-    enabled: true          # build-time: matches the image (KC_TRACING_ENABLED)
-    endpoint: http://otel-collector.rhbk-tracing.svc.cluster.local:4317
-    samplerRatio: 1
-  additionalOptions:
-    # [Observability part 1 - metrics and alerts] /metrics endpoint.
-    - name: metrics-enabled
-      value: "true"
-    # [Observability part 2 - dashboards] percentiles (p95, p99) of HTTP response times.
-    - name: http-metrics-histograms-enabled
-      value: "true"
-    # [Observability part 3 - logs] JSON console logs (runtime option): fields (level, loggerName,
-    # message...) can be filtered in Loki with the "| json" LogQL parser.
-    - name: log-console-output
-      value: json
   scheduling:
     affinity:
       podAntiAffinity:
@@ -479,11 +673,12 @@ spec:
                   app.kubernetes.io/instance: KEYCLOAK_NAME   # replaced by the overlay
 ```
 
-### 5.5 `base/keycloak/routes.yaml`
+### 8.5 `base/keycloak/routes.yaml`
 
 Trois routes en reencrypt. Les deux routes publiques partagent le même hostname,
 avec un `path` différent. La route admin n'a pas de `path` : elle prend tout.
 
+`base/keycloak/routes.yaml`
 ```yaml
 # Public hostname: only /realms and /resources are exposed (Keycloak recommendation).
 # /admin, / and every other path get a 503 from the router.
@@ -552,123 +747,7 @@ spec:
 Pour restreindre l'accès à la console à certaines adresses IP, décommente
 l'annotation `ip_whitelist` (adresses ou CIDR séparés par des espaces).
 
----
-
-### 5.6 `base/keycloak/prometheusrule.yaml`
-
-Alertes déployées dans chaque environnement. Elles sont évaluées par le Thanos Ruler
-de la **surveillance des projets utilisateur**, activée par l'Application
-`platform-monitoring` de `rhbk-platform` (prérequis 12). Une règle ne voit que les
-séries de son namespace : les métriques Keycloak (collectées par le ServiceMonitor que
-crée l'opérateur, port de gestion 9000) et les métriques de pods du namespace
-(`kube_pod_status_ready`, `kube_pod_container_status_restarts_total`).
-
-| Alerte | Déclenchement | Sévérité |
-|---|---|---|
-| `KeycloakNotReady` | aucun pod Keycloak prêt depuis 5 min | critical |
-| `PostgresNotReady` | pod PostgreSQL non prêt depuis 5 min | critical |
-| `KeycloakDegraded` | moins de pods prêts que de replicas demandés depuis 10 min (le service tourne sur les autres) | warning |
-| `KeycloakMetricsTargetDown` | port de métriques injoignable depuis 5 min | warning |
-| `KeycloakFrequentRestarts` | plus de 2 redémarrages en 1 h | warning |
-| `KeycloakHighServerErrorRate` | plus de 5 % de réponses 5xx pendant 10 min (hors `/health`, `/metrics`) | warning |
-| `KeycloakSlowResponses` | temps de réponse moyen supérieur à 1 s pendant 10 min | warning |
-| `KeycloakDatabasePoolExhausted` | requêtes en attente d'une connexion à la base depuis 5 min | warning |
-| `KeycloakHeapUsageHigh` | mémoire JVM (heap) au-delà de 90 % pendant 15 min | warning |
-
-```yaml
-# Keycloak alerts, deployed in each environment namespace. Evaluated by the user workload
-# Thanos Ruler: rules only see the series of their own namespace (Keycloak metrics scraped by the
-# operator ServiceMonitor, and kube-state-metrics series for pods of the namespace).
-# Health endpoints and /metrics are excluded from the HTTP indicators.
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: keycloak-alerts
-  annotations:
-    argocd.argoproj.io/sync-wave: "1"
-spec:
-  groups:
-    - name: keycloak
-      rules:
-        - alert: KeycloakNotReady
-          expr: sum(kube_pod_status_ready{pod=~"rhbk-[a-z]+-[0-9]+", condition="true"}) == 0
-          for: 5m
-          labels:
-            severity: critical
-          annotations:
-            summary: "No Keycloak pod is ready in {{ $labels.namespace }}"
-            description: "Check the pod (oc get pods), the database and the Keycloak CR status."
-        - alert: KeycloakDegraded
-          # With 2+ replicas a failed pod no longer stops the service: this alert makes it visible.
-          expr: kube_statefulset_status_replicas_ready{statefulset=~"rhbk-[a-z]+"} < kube_statefulset_replicas{statefulset=~"rhbk-[a-z]+"}
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Keycloak {{ $labels.statefulset }}: {{ $value }} pod(s) ready, fewer than expected"
-            description: "The service still runs on the remaining pods. Check the failed pod (oc get pods); if it stays on an old revision after a fix, delete it."
-        - alert: KeycloakMetricsTargetDown
-          expr: up{endpoint="management", service=~".+-service"} == 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Keycloak metrics endpoint is down ({{ $labels.pod }})"
-            description: "Prometheus cannot scrape the management port (9000)."
-        - alert: KeycloakFrequentRestarts
-          expr: increase(kube_pod_container_status_restarts_total{container="keycloak"}[1h]) > 2
-          labels:
-            severity: warning
-          annotations:
-            summary: "Keycloak pod {{ $labels.pod }} restarted {{ $value | humanize }} times in 1h"
-            description: "Often the database not being ready (after a cluster restart) or a memory limit."
-        - alert: KeycloakHighServerErrorRate
-          expr: |
-            sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR", uri!~"/health.*|/metrics"}[5m]))
-              / sum(rate(http_server_requests_seconds_count{uri!~"/health.*|/metrics"}[5m])) > 0.05
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: "More than 5% of Keycloak requests fail with a 5xx error"
-            description: "Current ratio: {{ $value | humanizePercentage }}."
-        - alert: KeycloakSlowResponses
-          expr: |
-            sum(rate(http_server_requests_seconds_sum{uri!~"/health.*|/metrics"}[5m]))
-              / sum(rate(http_server_requests_seconds_count{uri!~"/health.*|/metrics"}[5m])) > 1
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Keycloak average response time is above 1s"
-            description: "Current average: {{ $value | humanizeDuration }}."
-        - alert: KeycloakDatabasePoolExhausted
-          expr: max(agroal_awaiting_count) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Keycloak requests are waiting for a database connection"
-            description: "The connection pool (db.poolMaxSize) is saturated or the database is slow."
-        - alert: KeycloakHeapUsageHigh
-          expr: sum(jvm_memory_used_bytes{area="heap"}) / sum(jvm_memory_max_bytes{area="heap"} > 0) > 0.9
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Keycloak heap usage above 90%"
-            description: "Current usage: {{ $value | humanizePercentage }}. Consider raising the memory limit."
-        - alert: PostgresNotReady
-          expr: sum(kube_pod_status_ready{pod=~"postgres-db-.+", condition="true"}) == 0
-          for: 5m
-          labels:
-            severity: critical
-          annotations:
-            summary: "The PostgreSQL pod is not ready in {{ $labels.namespace }}"
-            description: "Keycloak cannot work without its database (postgres-db)."
-```
-
-### 5.7 `base/keycloak/poddisruptionbudget.yaml`
+### 8.6 `base/keycloak/poddisruptionbudget.yaml`
 
 Un PodDisruptionBudget (PDB) limite le nombre de pods arrêtés en même temps lors d'une
 **interruption volontaire**, c'est-à-dire surtout un **drainage de nœud** (mise à jour
@@ -688,9 +767,10 @@ nombre de replicas :
 toute éviction et **bloque les drainages** (cas rencontré avec le chart Vault, alerte
 `PodDisruptionBudgetAtLimit`). Avec `maxUnavailable: 1`, un seul fichier convient aux deux
 environnements : l'overlay ne remplace que le nom d'instance dans le sélecteur
-(`replacements`, section 6.1). Le PDB complète l'anti-affinité du CR (section 5.4), qui
+(`replacements`, section 9.1). Le PDB complète l'anti-affinité du CR (section 8.4), qui
 place les pods de prod sur des nœuds différents : un drainage n'en touche qu'un.
 
+`base/keycloak/poddisruptionbudget.yaml`
 ```yaml
 # The Keycloak operator creates no PodDisruptionBudget. maxUnavailable: 1 keeps at least one pod
 # during node drains when there are 2+ replicas, and never blocks a drain with a single replica
@@ -710,15 +790,20 @@ spec:
       app.kubernetes.io/instance: KEYCLOAK_NAME   # replaced by the overlay
 ```
 
-## 6. Les overlays prod et dev
+**Résultat** : 6 fichiers dans `base/keycloak/`.
 
-Chaque overlay contient 4 fichiers. Ils ne diffèrent entre prod et dev que par les
-valeurs.
+---
 
-### 6.1 `overlays/prod/kustomization.yaml`
+## 9. Étape : les overlays prod et dev
+
+**Objectif** : ce qui change par environnement (namespace, nom d'instance, hostnames,
+nombre de pods, ressources). Chaque overlay contient 4 fichiers ; prod et dev ne diffèrent
+que par les valeurs.
+
+### 9.1 `overlays/prod/kustomization.yaml`
 
 - `resources` : la base Keycloak et les ExternalSecrets de l'environnement
-  (section 7).
+  (étape 10).
 - `namespace` : appliqué à toutes les ressources (sauf le `subjects[].namespace`
   `openshift-ingress` du RoleBinding, que Kustomize ne touche pas).
 - `labels` : ajoutés sur toutes les ressources, sans toucher aux sélecteurs.
@@ -726,9 +811,9 @@ valeurs.
   **toutes** les routes, puis `patch-route-admin.yaml` corrige celui de `rhbk-admin`.
 - `replacements` : recopie le nom de l'instance Keycloak (fixé par
   `patch-keycloak.yaml`) dans les sélecteurs du Service et du PodDisruptionBudget, et
-  dans l'anti-affinity. Le
-  nom n'est ainsi écrit qu'à un seul endroit.
+  dans l'anti-affinité. Le nom n'est ainsi écrit qu'à un seul endroit.
 
+`overlays/prod/kustomization.yaml`
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -775,11 +860,12 @@ replacements:
           - spec.scheduling.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.0.podAffinityTerm.labelSelector.matchLabels.app\.kubernetes\.io/instance
 ```
 
-### 6.2 `overlays/prod/patch-keycloak.yaml`
+### 9.2 `overlays/prod/patch-keycloak.yaml`
 
 Patch JSON 6902 (liste d'opérations) appliqué au CR Keycloak. La prod tourne avec
 **2 instances** (haute disponibilité, section 15.8) ; dev avec une seule.
 
+`overlays/prod/patch-keycloak.yaml`
 ```yaml
 - op: replace
   path: /metadata/name
@@ -802,13 +888,11 @@ Patch JSON 6902 (liste d'opérations) appliqué au CR Keycloak. La prod tourne a
     limits:
       cpu: "2"
       memory: "2250M"
-- op: replace
-  path: /spec/tracing/samplerRatio
-  value: 0.1
 ```
 
-### 6.3 `overlays/prod/patch-routes.yaml`
+### 9.3 `overlays/prod/patch-routes.yaml`
 
+`overlays/prod/patch-routes.yaml`
 ```yaml
 # Applied to every Route; the admin host is fixed right after by patch-route-admin.yaml.
 - op: replace
@@ -816,10 +900,11 @@ Patch JSON 6902 (liste d'opérations) appliqué au CR Keycloak. La prod tourne a
   value: prod-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
 ```
 
-### 6.4 `overlays/prod/patch-route-admin.yaml`
+### 9.4 `overlays/prod/patch-route-admin.yaml`
 
 Patch « strategic merge » : Kustomize retrouve la route par son nom.
 
+`overlays/prod/patch-route-admin.yaml`
 ```yaml
 apiVersion: route.openshift.io/v1
 kind: Route
@@ -829,7 +914,7 @@ spec:
   host: prod-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
 ```
 
-### 6.5 `overlays/dev/*`
+### 9.5 `overlays/dev/*`
 
 Copie les 4 fichiers de prod :
 
@@ -891,13 +976,17 @@ spec:
   host: dev-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
 ```
 
+**Résultat** : `overlays/prod/` et `overlays/dev/` avec 4 fichiers chacun (les
+ExternalSecrets suivent à l'étape 10).
+
 ---
 
-## 7. Les ExternalSecrets (secrets depuis Vault)
+## 10. Étape : les ExternalSecrets (secrets depuis Vault)
 
-Les trois Secrets dont Keycloak a besoin ne sont **jamais écrits dans git**. Le dépôt
-contient seulement des `ExternalSecret` : chacun indique à External Secrets Operator
-(ESO) quel chemin lire dans Vault et quel Secret Kubernetes créer.
+**Objectif** : faire créer par ESO, depuis Vault (étape 5), les trois Secrets dont Keycloak
+a besoin. Ils ne sont **jamais écrits dans git** : le dépôt contient seulement des
+`ExternalSecret`, qui indiquent à ESO quel chemin lire dans Vault et quel Secret
+Kubernetes créer.
 
 ```
 ExternalSecret (git) ──▶ ESO ──(ClusterSecretStore vault-store)──▶ Vault secret/rhbk/<env>/...
@@ -1047,14 +1136,22 @@ Copie pour dev, en remplaçant les chemins Vault :
 for f in kustomization rhbk-db-secret initial-admin-secret rhbk-tls-secret; do sed 's#rhbk/prod/#rhbk/dev/#' overlays/prod/external-secrets/$f.yaml > overlays/dev/external-secrets/$f.yaml; done
 ```
 
-## 8. La configuration ArgoCD
+**Résultat** : 4 fichiers dans `overlays/<env>/external-secrets/` pour chaque environnement.
 
-### 8.1 `argocd/appproject.yaml`
+---
+
+## 11. Étape : la configuration ArgoCD
+
+**Objectif** : le projet ArgoCD, les deux Applications (une par environnement) et l'app of
+apps qui les crée.
+
+### 11.1 `argocd/appproject.yaml`
 
 Le projet `rhbk` limite ce que ses Applications peuvent faire : un seul dépôt
 source, deux namespaces cibles, et **aucune ressource de niveau cluster** : les
 namespaces et les opérateurs appartiennent à `rhbk-platform`.
 
+`argocd/appproject.yaml`
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
@@ -1077,7 +1174,7 @@ spec:
       kind: "*"
 ```
 
-### 8.2 `argocd/applications/rhbk-prod.yaml`
+### 11.2 `argocd/applications/rhbk-prod.yaml`
 
 Prod est en **synchro manuelle** : pas de bloc `automated`. ArgoCD détecte les
 écarts (`OutOfSync`) mais n'applique rien sans un clic sur **Sync**.
@@ -1086,6 +1183,7 @@ Pas de `CreateNamespace` ni de `managedNamespaceMetadata` : le namespace est cr�
 étiqueté par `rhbk-platform`. Si les deux dépôts géraient les métadonnées du
 namespace, les Applications de la plateforme resteraient `OutOfSync`.
 
+`argocd/applications/rhbk-prod.yaml`
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -1108,12 +1206,13 @@ spec:
       - ServerSideApply=true
 ```
 
-### 8.3 `argocd/applications/rhbk-dev.yaml`
+### 11.3 `argocd/applications/rhbk-dev.yaml`
 
 Dev est en **synchro automatique** : chaque commit est appliqué, les ressources
 retirées du dépôt sont supprimées (`prune`) et les modifications manuelles sur le
 cluster sont annulées (`selfHeal`).
 
+`argocd/applications/rhbk-dev.yaml`
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -1138,8 +1237,9 @@ spec:
       - ServerSideApply=true
 ```
 
-### 8.4 `argocd/kustomization.yaml`
+### 11.4 `argocd/kustomization.yaml`
 
+`argocd/kustomization.yaml`
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -1149,11 +1249,12 @@ resources:
   - applications/rhbk-dev.yaml
 ```
 
-### 8.5 `bootstrap/root-app.yaml`
+### 11.5 `bootstrap/root-app.yaml`
 
 L'app of apps. Elle appartient au projet `default`, car le projet `rhbk` n'existe
 pas encore quand on l'applique.
 
+`bootstrap/root-app.yaml`
 ```yaml
 # App of apps: apply once by hand (oc apply -f bootstrap/root-app.yaml).
 # It then manages the AppProject and the rhbk-prod / rhbk-dev Applications from argocd/.
@@ -1177,7 +1278,7 @@ spec:
       selfHeal: true
 ```
 
-### 8.6 Changer l'URL du dépôt
+### 11.6 Changer l'URL du dépôt
 
 Si tu utilises un autre dépôt, remplace l'URL dans les 4 fichiers :
 
@@ -1185,54 +1286,52 @@ Si tu utilises un autre dépôt, remplace l'URL dans les 4 fichiers :
 grep -rl 'github.com/msakho/rhbk-gitops.git' bootstrap argocd | xargs sed -i '' 's#https://github.com/msakho/rhbk-gitops.git#https://github.com/<compte>/<depot>.git#g'
 ```
 
+**Résultat** : le dépôt local est complet.
+
 ---
 
-## 9. Valider en local
+## 12. Étape : valider, pousser et lancer ArgoCD
 
-Avant de pousser, vérifie que tout se construit et que l'API accepte les objets.
+**Objectif** : vérifier le dépôt, le publier sur GitHub, puis donner la main à ArgoCD.
 
-**9.1 Rendu Kustomize** (aucun accès au cluster nécessaire) :
+### 12.1 Valider en local
+
+**Rendu Kustomize** (aucun accès au cluster nécessaire) :
 
 ```bash
 oc kustomize overlays/prod > /dev/null && oc kustomize overlays/dev > /dev/null && oc kustomize argocd > /dev/null && echo "BUILD OK"
 ```
 
-**9.2 Aucun placeholder ne doit rester** dans le rendu :
+**Aucune valeur factice ne doit rester** dans le rendu (ni le `<DIGEST>` de l'étape 8.4) :
 
 ```bash
-oc kustomize overlays/dev | grep -nE 'PLACEHOLDER|KEYCLOAK_NAME' || echo "OK : aucun placeholder"
+oc kustomize overlays/dev | grep -nE 'PLACEHOLDER|KEYCLOAK_NAME|<DIGEST>' || echo "OK : aucune valeur factice"
 ```
 
-**9.3 Valeurs clés du rendu** :
+**Valeurs clés du rendu** :
 
 ```bash
-oc kustomize overlays/dev | grep -nE '^  namespace:|host:|hostname:|admin: https|instance:'
+oc kustomize overlays/dev | grep -nE '^  namespace:|host:|hostname:|admin: https|instance:|image:'
 ```
 
-Vérifie le namespace, les 3 hostnames de routes, les 2 hostnames du CR et le nom
-de l'instance dans le sélecteur.
+Vérifie le namespace, les 3 hostnames de routes, les 2 hostnames du CR, le nom
+de l'instance dans les sélecteurs et l'image avec son digest.
 
-**9.4 Dry-run côté serveur** (connecté au cluster) :
-
-Il échoue sur les `ExternalSecret` si ESO n'est pas installé (CRD absente) : voir
-le prérequis 6. Le namespace doit aussi exister (prérequis 3).
+**Dry-run côté serveur** (connecté au cluster) :
 
 ```bash
 oc apply --dry-run=server -k overlays/dev
 ```
 
 Les ressources doivent apparaître en `created (server dry run)` ou
-`configured (server dry run)`.
+`configured (server dry run)`. Il échoue sur les `ExternalSecret` si ESO n'est pas
+installé (CRD absente, prérequis 5), ou si le namespace n'existe pas (prérequis 3).
 
 Sur un environnement déjà déployé par ArgoCD, l'avertissement
 `missing the kubectl.kubernetes.io/last-applied-configuration annotation` est
 normal : ArgoCD applique en server-side apply et ne pose pas cette annotation.
 
----
-
-## 10. Pousser le dépôt
-
-### 10.1 Commit et push
+### 12.2 Commit et push
 
 ```bash
 git init -b main
@@ -1263,31 +1362,27 @@ GitHub n'accepte pas le mot de passe du compte pour git. Utilise la CLI GitHub
 (`brew install gh`, puis `gh auth login --hostname github.com --git-protocol https --web`)
 ou un Personal Access Token avec le droit *Contents: Read and write*.
 
-### 10.2 Dépôt privé
+### 12.3 Dépôt privé
 
 ArgoCD doit pouvoir lire le dépôt. Dans la console ArgoCD : **Settings →
 Repositories → Connect repo**, méthode HTTPS, avec un token en lecture seule.
 
----
+### 12.4 Lancer ArgoCD (bootstrap)
 
-## 11. Bootstrap ArgoCD
-
-**11.1 Vérifier une dernière fois les prérequis** de la section 2 pour les deux
-namespaces.
-
-**11.2 Appliquer l'app of apps** :
+Revérifie une dernière fois les prérequis de l'étape 2 pour les deux namespaces, puis
+applique l'app of apps :
 
 ```bash
 oc apply -f bootstrap/root-app.yaml
 ```
 
-**11.3 Vérifier la création des Applications** (environ 30 secondes) :
+Vérifie la création des Applications (environ 30 secondes) :
 
 ```bash
 oc get applications -n openshift-gitops -o 'custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status'
 ```
 
-Résultat attendu :
+**Résultat attendu** :
 
 | Application | SYNC | HEALTH |
 |---|---|---|
@@ -1297,9 +1392,11 @@ Résultat attendu :
 
 ---
 
-## 12. Synchroniser dev puis prod
+## 13. Étape : synchroniser et tester
 
-### 12.1 Dev (automatique)
+**Objectif** : Keycloak en ligne en dev puis en prod, console d'administration isolée.
+
+### 13.1 Dev (automatique)
 
 Rien à faire. Suis l'avancement :
 
@@ -1310,7 +1407,7 @@ oc get application rhbk-dev -n openshift-gitops -w
 Compte 1 à 2 minutes. L'ordre des waves est visible dans la console ArgoCD : le
 Service et le RBAC, puis Keycloak, qui doit devenir **Healthy**, puis les routes.
 
-### 12.2 Prod (manuel)
+### 13.2 Prod (manuel)
 
 1. Dans la console ArgoCD, ouvre l'Application `rhbk-prod` et clique sur
    **App Diff** pour relire ce qui va être appliqué.
@@ -1328,11 +1425,7 @@ oc get application rhbk-prod -n openshift-gitops -w
 
 Attends `Synced` / `Healthy`.
 
----
-
-## 13. Tester le déploiement
-
-### 13.1 État
+### 13.3 État
 
 ```bash
 oc get applications -n openshift-gitops -o 'custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status'
@@ -1346,9 +1439,20 @@ oc get keycloak,pods,route -n rhbk-dev
 oc get externalsecret -n rhbk-dev
 ```
 
-Les trois ExternalSecrets doivent être en `SecretSynced` / `READY True`.
+Les trois ExternalSecrets doivent être en `SecretSynced` / `READY True`. En prod, deux
+pods `rhbk-prod-0` et `rhbk-prod-1`, sur des nœuds différents :
 
-### 13.2 Isolation et accès
+```bash
+oc get pods -n rhbk -l app=keycloak -o wide
+```
+
+Version de Keycloak qui tourne :
+
+```bash
+oc exec -n rhbk-dev rhbk-dev-0 -- cat /opt/keycloak/version.txt
+```
+
+### 13.4 Isolation et accès
 
 Ce script teste les deux environnements :
 
@@ -1369,7 +1473,7 @@ Résultats attendus :
 | `https://<env>-rhbk-admin…/admin/master/console/` | **200** |
 | `tls=` | **0** (certificat valide) |
 
-### 13.3 Connexion
+### 13.5 Connexion
 
 1. Ouvre `https://dev-rhbk-admin.<domaine>/admin/`.
 2. Connecte-toi avec l'admin temporaire :
@@ -1378,6 +1482,12 @@ Résultats attendus :
    ```
 3. Crée un administrateur permanent dans le realm `master`, puis supprime
    l'utilisateur temporaire.
+
+### 13.6 Et ensuite
+
+Le socle est en place. Pour l'observabilité (métriques et alertes, tableaux de bord, logs,
+traces), suivre [`docs/observabilite.md`](observabilite.md), partie par partie. Pour
+l'exploitation au quotidien : section 15.
 
 ---
 
@@ -1410,7 +1520,7 @@ ressources déployées : elles restent en place, simplement plus suivies.
    ```bash
    oc get keycloak -A
    ```
-4. Applique le `bootstrap/root-app.yaml` du **nouveau** dépôt (section 11).
+4. Applique le `bootstrap/root-app.yaml` du **nouveau** dépôt (étape 12.4).
    ArgoCD reprend les ressources existantes : elles portent les mêmes noms, et la
    synchro ne fait que mettre à jour l'annotation de suivi.
 
@@ -1445,7 +1555,10 @@ alors être réunis pour ces nouveaux namespaces :
 
 ### 15.1 Déployer une nouvelle image Keycloak
 
-1. Modifier `custom-rhbk/Containerfile`, puis builder et pousser :
+Première construction de l'image et explications : étape 7.
+
+1. Modifier `custom-rhbk/Containerfile` si besoin (sans modification, un nouveau build prend
+   la dernière version 26.6.x de l'image Red Hat), puis builder et pousser :
    ```bash
    podman build --platform linux/amd64 -t quay.io/msakho0/mskeycloak:26.6 -f custom-rhbk/Containerfile custom-rhbk
    ```
@@ -1668,11 +1781,11 @@ git add overlays/qualif argocd && git commit -m "Add qualif environment" && git 
 oc get application rhbk-qualif -n openshift-gitops -w
 ```
 
-En synchro manuelle, lancer **Sync** depuis la console ArgoCD (section 12.2).
+En synchro manuelle, lancer **Sync** depuis la console ArgoCD (section 13.2).
 
 #### 15.3.7 Tester
 
-Le script de la section 13.2 avec `qualif` :
+Le script de la section 13.4 avec `qualif` :
 
 ```bash
 D=apps.cluster-nnljw.nnljw.sandbox742.opentlc.com; P=https://qualif-rhbk.$D; A=https://qualif-rhbk-admin.$D
@@ -1793,11 +1906,11 @@ connexion avec le compte OpenShift, dossier **Keycloak** : tableaux officiels
 JVM, caches, CPU) et *Keycloak capacity planning* (connexions réussies et échouées,
 émissions de jetons, par realm). Choisir le namespace `rhbk` ou `rhbk-dev` en haut du
 tableau. Les métriques de connexions et les percentiles reposent sur les options de la
-section 5.4 et du Containerfile (`user-event-metrics`, histogrammes HTTP).
+partie 2 de `observabilite.md` (`user-event-metrics`, histogrammes HTTP).
 
 | Origine | Alertes | Défini dans |
 |---|---|---|
-| Keycloak et PostgreSQL, par environnement | section 5.6 | `rhbk-gitops`, `base/keycloak/prometheusrule.yaml` |
+| Keycloak et PostgreSQL, par environnement | `observabilite.md`, étape 1.3 | `rhbk-gitops`, `base/keycloak/prometheusrule.yaml` |
 | ESO | `ExternalSecretNotSynced` (15 min), `ClusterSecretStoreNotReady` | `rhbk-platform`, `monitoring/` |
 | Vault | `VaultSealedOrDown` : Vault scellé ou arrêté depuis 5 min (pod non prêt) | `rhbk-platform`, `monitoring/` |
 | ArgoCD | `ArgoCDApplicationUnhealthy` (Degraded / Missing / Unknown depuis 15 min) ; `ArgoCDSyncAlert` (OutOfSync, fournie par l'opérateur GitOps) | `rhbk-platform`, `monitoring/` |
@@ -2001,7 +2114,7 @@ pendant ce temps sur l'autre pod.
 3. **Avant d'ajouter une option dans le CR, vérifier qu'elle est d'exécution** (section
    15.1) : une option de build différente de l'image empêche Keycloak de démarrer.
 4. **Prod à 2 replicas minimum**, avec le PodDisruptionBudget `maxUnavailable: 1`
-   (section 5.7) et l'alerte `KeycloakDegraded`, qui signale un pod en échec que le
+   (section 8.6) et l'alerte `KeycloakDegraded`, qui signale un pod en échec que le
    service masque.
 
 **Option à évaluer** : `spec.update.strategy: Auto`. L'opérateur lance un Job qui vérifie
@@ -2013,7 +2126,7 @@ change ; sinon, un recreate. À tester en dev avant de l'appliquer en prod.
 
 Les logs de Keycloak (et de PostgreSQL, Vault, ESO, ArgoCD…) sont collectés par
 OpenShift Logging et stockés 7 jours dans Loki (`rhbk-platform`, Application `logging`).
-Keycloak écrit ses logs en **JSON** (`log-console-output: json`, section 5.4).
+Keycloak écrit ses logs en **JSON** (`log-console-output: json`, `observabilite.md`, étape 3.4).
 
 **Où les voir** : console OpenShift, **Observe → Logs** (choisir le namespace), ou onglet
 **Aggregated Logs** d'un pod. Les requêtes s'écrivent en **LogQL**.
@@ -2081,7 +2194,7 @@ pour qu'on ne puisse pas deviner, à la durée de réponse, si un compte existe.
 | `rhbk-prod` reste `OutOfSync` | Normal : synchro manuelle | Relire le diff, puis **Sync**. |
 | Juste après un redémarrage du cluster : Applications en `Unknown`, `unable to resolve parseableType … Kind=Route` | Schéma des Routes pas encore publié quand le contrôleur ArgoCD a démarré | Attendre quelques minutes et relire l'Application ; si ça persiste au-delà de 15 minutes, redémarrer le contrôleur ArgoCD (section 15.5). |
 | Après un descellement de Vault : un ExternalSecret reste en `SecretSyncedError` alors que le store est `Valid` | ESO espace ses nouvelles tentatives après plusieurs échecs | Forcer la relecture (`force-sync`, section 15.5). |
-| Les ExternalSecrets restent `OutOfSync` dans ArgoCD alors qu'ils sont `SecretSynced` | Les valeurs par défaut ajoutées par le webhook d'ESO ne sont pas dans git | Les déclarer explicitement (section 7) ; comparer avec `oc get externalsecret <nom> -n <ns> -o yaml`. |
+| Les ExternalSecrets restent `OutOfSync` dans ArgoCD alors qu'ils sont `SecretSynced` | Les valeurs par défaut ajoutées par le webhook d'ESO ne sont pas dans git | Les déclarer explicitement (section 10) ; comparer avec `oc get externalsecret <nom> -n <ns> -o yaml`. |
 | ExternalSecret en `SecretSyncedError`, message `ClusterSecretStore "vault-store" is not ready` | Le store n'est pas valide | `oc get clustersecretstore vault-store -o yaml` : voir les lignes suivantes. |
 | Store invalide : `unable to log in with Kubernetes auth: context deadline exceeded` | Les pods ESO sont isolés par des NetworkPolicies deny-all : la sortie vers Vault n'est pas ouverte | Dans `rhbk-platform`, ajouter la règle d'egress dans `eso/externalsecretsconfig.yaml` (`spec.controllerConfig.networkPolicies`, annexe A.2), puis synchroniser `eso-config`. Jamais de NetworkPolicy à la main. |
 | Store invalide : `Vault is sealed` / code 503 | Vault redémarré et scellé | Desceller (section 15.5). |
@@ -2116,7 +2229,7 @@ namespaces rhbk, rhbk-dev           : namespace + opérateur RHBK      Applicati
 | 3 | Sync `vault`, puis **étapes manuelles A.4, A.5 et A.7** |
 | 4 | Sync `eso-config` → `oc get clustersecretstore vault-store` : `Valid` |
 | 5 | Sync `rhbk-operator-<env>` (namespace + opérateur RHBK) |
-| 6 | Puis, dans ce dépôt : bootstrap applicatif (section 11) |
+| 6 | Puis, dans ce dépôt : bootstrap applicatif (étape 12.4) |
 
 ### A.2 Deux pièges déjà traités dans `rhbk-platform`
 
@@ -2281,7 +2394,7 @@ L'interface web est aussi utilisable :
 
 Si un environnement fonctionne déjà avec des Secrets créés à la main :
 
-1. Copier leurs valeurs dans Vault, sous les chemins de la section 7.
+1. Copier leurs valeurs dans Vault, sous les chemins de la section 10.
 2. Activer les ExternalSecrets dans l'overlay (ligne `- external-secrets`), commit,
    push, synchro.
 
@@ -2602,13 +2715,13 @@ les sections référencées et dans le README de `rhbk-platform`.
 |---|---|---|---|
 | État d'ensemble (prod / dev, base, Vault, ESO, ArgoCD, trafic, connexions) | Observe → Dashboards (Perses), projet `rhbk-observability` | `rhbk-platform` : `observability-console/` | README plateforme |
 | Tableaux officiels Keycloak (*troubleshooting*, *capacity planning*) | `https://grafana.apps.<domaine>` (compte OpenShift) | `rhbk-platform` : `grafana/` | 15.6 |
-| Alertes Keycloak / PostgreSQL | Observe → Alerting | `rhbk-gitops` : `base/keycloak/prometheusrule.yaml` | 5.6, 15.6 |
+| Alertes Keycloak / PostgreSQL | Observe → Alerting | `rhbk-gitops` : `base/keycloak/prometheusrule.yaml` | `observabilite.md` 1.3, 15.6 |
 | Alertes ESO, Vault, ArgoCD | Observe → Alerting | `rhbk-platform` : `monitoring/` | 15.6 |
 | Notifications | logs du webhook `alert-webhook-test` (puis e-mail) | `rhbk-platform` : `monitoring/alertmanager-main.yaml` | 15.7 |
 | Requêtes sur les métriques | Observe → Metrics | — | 15.6 |
 | Logs (Keycloak en JSON, PostgreSQL, Vault, ESO, ArgoCD) | Observe → Logs | `rhbk-platform` : `logging/` (y compris le plugin de console) ; option Keycloak dans `base/keycloak/keycloak.yaml` | 15.9 |
 | Traces (requête HTTP → traitement → SQL) | Observe → Traces, instance `rhbk-tracing / tempo`, tenant `rhbk` | `rhbk-platform` : `tracing/` (y compris le plugin de console) ; `spec.tracing` dans le CR | 15.10 |
-| Haute disponibilité de Keycloak (prod) | Observe → Dashboards, alerte `KeycloakDegraded` | `overlays/prod/patch-keycloak.yaml`, `base/keycloak/poddisruptionbudget.yaml` | 5.7, 15.8 |
+| Haute disponibilité de Keycloak (prod) | Observe → Dashboards, alerte `KeycloakDegraded` | `overlays/prod/patch-keycloak.yaml`, `base/keycloak/poddisruptionbudget.yaml` | 8.6, 15.8 |
 
 | Conservation | Durée | Stockage |
 |---|---|---|
@@ -2628,13 +2741,14 @@ les sections référencées et dans le README de `rhbk-platform`.
 | 4 | `loki-operator`, `logging-operator`, puis `logging` | LokiStack, collecteur (applications + `openshift-gitops`), plugin Logs de la console |
 | 5 | `tempo-operator`, `otel-operator`, puis `tracing` | TempoStack, OpenTelemetry Collector, plugin Traces de la console |
 
-**Application** (`rhbk-gitops`), dans cet ordre (règles de la section 15.8) :
+**Application** (`rhbk-gitops`) : chaque partie d'`observabilite.md` ajoute ses changements
+Keycloak au socle (étapes 1.3, 2.2, 3.4 et 4.4), selon les règles de la section 15.8 :
 
-| Étape | Changement | Type | Effet en prod |
+| Changement | Parties | Type | Effet en prod |
 |---|---|---|---|
-| 1 | `PrometheusRule` et `PodDisruptionBudget` (base) | ressources | aucun |
-| 2 | options d'exécution du CR : `metrics-enabled`, `http-metrics-histograms-enabled`, `log-console-output: json`, `spec.tracing.endpoint` et `samplerRatio` | commit d'options | rolling update, sans coupure (2 replicas) |
-| 3 | image avec les options de build (`KC_FEATURES=user-event-metrics`, `KC_EVENT_METRICS_USER_ENABLED`, `KC_TRACING_ENABLED`), nouveau digest, `features` et `tracing.enabled` dans le CR | commit d'image | recreate, coupure d'environ 1 minute |
+| `PrometheusRule` (base) | 1 | ressource | aucun |
+| options d'exécution du CR : `metrics-enabled`, `http-metrics-histograms-enabled`, `log-console-output: json`, `spec.tracing.endpoint` et `samplerRatio` | 1, 2, 3, 4 | commit d'options | rolling update, sans coupure (2 replicas) |
+| image avec les options de build (`KC_FEATURES=user-event-metrics`, `KC_EVENT_METRICS_USER_ENABLED`, `KC_TRACING_ENABLED`), nouveau digest, `features` et `tracing.enabled` dans le CR | 2, 4 | commit d'image | recreate, coupure d'environ 1 minute |
 
 ### D.4 Options Keycloak de l'observabilité
 
@@ -2709,7 +2823,8 @@ requête de traces `{resource.service.name="rhbk-dev"}` (section 15.10).
 
 ### D.7 Renvois
 
-- 5.4 : options du CR Keycloak ; 5.6 : alertes Keycloak ; 5.7 : PodDisruptionBudget
+- 1.6 et 15.1 : options de build et d'exécution ; 7 : construction de l'image ; 8.4 : CR Keycloak
+  (socle) ; 8.6 : PodDisruptionBudget ; `observabilite.md` 1.3 : alertes Keycloak
 - 15.1 : options de build et d'exécution ; 15.5 : après un redémarrage ; 15.6 : alertes et
   tableaux de bord ; 15.7 : notifications et SMTP ; 15.8 : rolling update et recreate ;
   15.9 : logs ; 15.10 : traces ; 16 : dépannage
