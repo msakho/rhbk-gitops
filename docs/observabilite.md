@@ -704,8 +704,20 @@ options déjà présentes, avant `scheduling:`) :
 
 
 Vérifier en dev : `keycloak_user_events_total` apparaît après une première connexion, et
-`http_server_requests_seconds_bucket` est présent (`oc exec ... curl` sur le port 9000, ou
-**Observe → Metrics**).
+`http_server_requests_seconds_bucket` est présent (**Observe → Metrics**, ou en ligne de
+commande ci-dessous : l'image Keycloak n'a pas `curl`, on passe par un `port-forward`).
+
+```bash
+oc port-forward -n rhbk-dev pod/rhbk-dev-0 19000:9000 &
+```
+
+```bash
+curl -sk https://localhost:19000/metrics | grep -E '^keycloak_user_events_total|^http_server_requests_seconds_bucket' | head
+```
+
+```bash
+kill %1
+```
 
 ### 2.3 Grafana (Applications `grafana-operator` et `grafana`)
 
