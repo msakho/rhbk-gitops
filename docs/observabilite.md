@@ -1282,7 +1282,10 @@ spec:
 #### 2.4.2 Plugin Perses et tableau RHBK (Application `observability-console`)
 
 La source de données utilise le **jeton de l'utilisateur connecté à la console** : chacun ne
-voit que ce qu'il a le droit de voir. Le tableau est généré en JSON (YAML valide).
+voit que ce qu'il a le droit de voir. Le tableau est généré en JSON (YAML valide). Aucun
+namespace n'y est écrit en dur : la variable **Environnement**, en haut du tableau, liste
+automatiquement les namespaces où tourne un conteneur `keycloak` (tous sélectionnés par
+défaut). Un nouvel environnement y apparaît sans modifier le tableau.
 
 `rhbk-platform/observability-console/kustomization.yaml`
 ```yaml
@@ -1364,7 +1367,8 @@ spec:
 `rhbk-platform/observability-console/dashboard-rhbk-overview.yaml`
 ```yaml
 # RHBK overview dashboard (Perses), shown in the OpenShift console: Observe -> Dashboards (Perses),
-# project rhbk-observability. Prod (rhbk) and dev (rhbk-dev) side by side; platform state.
+# project rhbk-observability. Keycloak environments side by side, chosen with the "Environnement"
+# variable (namespaces running a keycloak container, discovered automatically); platform state.
 # Generated as JSON (valid YAML) to keep queries exact.
 {
   "apiVersion": "perses.dev/v1alpha2",
@@ -1408,7 +1412,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace) (kube_pod_status_ready{namespace=~\"rhbk|rhbk-dev\", pod=~\"rhbk-[a-z]+-[0-9]+\", condition=\"true\"})",
+                      "query": "sum by (namespace) (kube_pod_container_status_ready{namespace=~\"$namespace\", container=\"keycloak\"})",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1439,7 +1443,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace) (kube_pod_status_ready{namespace=~\"rhbk|rhbk-dev\", pod=~\"postgres-db-.+\", condition=\"true\"})",
+                      "query": "sum by (namespace) (kube_pod_status_ready{namespace=~\"$namespace\", pod=~\"postgres-db-.+\", condition=\"true\"})",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1566,7 +1570,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "count(ALERTS{alertstate=\"firing\", namespace=~\"rhbk(-.+)?|vault|external-secrets|openshift-gitops\"}) or vector(0)",
+                      "query": "count(ALERTS{alertstate=\"firing\", namespace=~\"$namespace|vault|external-secrets|openshift-gitops\"}) or vector(0)",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1603,7 +1607,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace) (rate(http_server_requests_seconds_count{namespace=~\"rhbk|rhbk-dev\", uri!~\"/health.*|/metrics\"}[5m]))",
+                      "query": "sum by (namespace) (rate(http_server_requests_seconds_count{namespace=~\"$namespace\", uri!~\"/health.*|/metrics\"}[5m]))",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1639,7 +1643,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace) (rate(http_server_requests_seconds_count{namespace=~\"rhbk|rhbk-dev\", outcome=\"SERVER_ERROR\", uri!~\"/health.*|/metrics\"}[5m])) / sum by (namespace) (rate(http_server_requests_seconds_count{namespace=~\"rhbk|rhbk-dev\", uri!~\"/health.*|/metrics\"}[5m]))",
+                      "query": "sum by (namespace) (rate(http_server_requests_seconds_count{namespace=~\"$namespace\", outcome=\"SERVER_ERROR\", uri!~\"/health.*|/metrics\"}[5m])) / sum by (namespace) (rate(http_server_requests_seconds_count{namespace=~\"$namespace\", uri!~\"/health.*|/metrics\"}[5m]))",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1675,7 +1679,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "histogram_quantile(0.95, sum by (namespace, le) (rate(http_server_requests_seconds_bucket{namespace=~\"rhbk|rhbk-dev\", uri!~\"/health.*|/metrics\"}[5m])))",
+                      "query": "histogram_quantile(0.95, sum by (namespace, le) (rate(http_server_requests_seconds_bucket{namespace=~\"$namespace\", uri!~\"/health.*|/metrics\"}[5m])))",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1712,7 +1716,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace, error) (rate(keycloak_user_events_total{namespace=~\"rhbk|rhbk-dev\", event=\"login\"}[5m]))",
+                      "query": "sum by (namespace, error) (rate(keycloak_user_events_total{namespace=~\"$namespace\", event=\"login\"}[5m]))",
                       "seriesNameFormat": "{{namespace}} {{error}}"
                     }
                   }
@@ -1749,7 +1753,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace) (agroal_active_count{namespace=~\"rhbk|rhbk-dev\"})",
+                      "query": "sum by (namespace) (agroal_active_count{namespace=~\"$namespace\"})",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1785,7 +1789,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace) (jvm_memory_used_bytes{namespace=~\"rhbk|rhbk-dev\", area=\"heap\"}) / sum by (namespace) (jvm_memory_max_bytes{namespace=~\"rhbk|rhbk-dev\", area=\"heap\"} > 0)",
+                      "query": "sum by (namespace) (jvm_memory_used_bytes{namespace=~\"$namespace\", area=\"heap\"}) / sum by (namespace) (jvm_memory_max_bytes{namespace=~\"$namespace\", area=\"heap\"} > 0)",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1821,7 +1825,7 @@ spec:
                   "plugin": {
                     "kind": "PrometheusTimeSeriesQuery",
                     "spec": {
-                      "query": "sum by (namespace) (rate(container_cpu_usage_seconds_total{namespace=~\"rhbk|rhbk-dev\", container=\"keycloak\"}[5m]))",
+                      "query": "sum by (namespace) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=\"keycloak\"}[5m]))",
                       "seriesNameFormat": "{{namespace}}"
                     }
                   }
@@ -1989,7 +1993,30 @@ spec:
           }
         }
       ],
-      "variables": []
+      "variables": [
+        {
+          "kind": "ListVariable",
+          "spec": {
+            "name": "namespace",
+            "display": {
+              "name": "Environnement",
+              "description": "Namespaces running a Keycloak container (rhbk = prod)."
+            },
+            "allowMultiple": true,
+            "allowAllValue": true,
+            "defaultValue": "$__all",
+            "plugin": {
+              "kind": "PrometheusLabelValuesVariable",
+              "spec": {
+                "labelName": "namespace",
+                "matchers": [
+                  "kube_pod_container_status_ready{container=\"keycloak\"}"
+                ]
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
