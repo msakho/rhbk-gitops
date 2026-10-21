@@ -2806,6 +2806,7 @@ requête de traces `{resource.service.name="rhbk-dev"}` (section 15.10).
 | Piège | Symptôme | Solution |
 |---|---|---|
 | Surveillance des projets utilisateur **désactivée par défaut** | ServiceMonitors présents mais aucune métrique collectée | `enableUserWorkload: true` (`platform-monitoring`) |
+| Namespace avec le label `openshift.io/cluster-monitoring=true` (souvent posé en pensant **activer** la surveillance) | `/metrics` répond (port-forward), ServiceMonitor présent, mais aucune cible dans Prometheus et rien dans Observe → Metrics, sans aucune erreur | retirer le label **à sa source** (manifeste du namespace dans git) : il réserve le namespace au Prometheus de la plateforme, et le Prometheus des projets utilisateur l'ignore |
 | Prometheus des projets utilisateur sans volume | métriques perdues à chaque redémarrage | `user-workload-monitoring-config` : PVC et rétention 7 jours |
 | Option de build placée dans le CR | Keycloak en CrashLoopBackOff (`build time options have values that differ`) | la mettre dans le Containerfile, rebuild (section 15.1) |
 | Pod de StatefulSet bloqué sur une ancienne révision | le pod reste en échec après correction du CR | `oc delete pod <pod>` (section 15.8) |

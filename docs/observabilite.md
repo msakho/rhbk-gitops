@@ -634,6 +634,18 @@ Commit et push : dev se met à jour seul (rolling update), puis synchroniser la 
 
 ### 1.4 Vérifier
 
+> **Piège** : les namespaces de Keycloak **ne doivent pas** porter le label
+> `openshift.io/cluster-monitoring=true`. Il les réserve au Prometheus de la plateforme, et le
+> Prometheus des projets utilisateur ignore alors leurs ServiceMonitors, sans aucune erreur :
+> `/metrics` répond, le ServiceMonitor existe, mais rien n'est collecté. Sortie vide attendue :
+
+```bash
+oc get ns rhbk rhbk-dev --show-labels | grep -o 'openshift.io/cluster-monitoring=[a-z]*'
+```
+
+Si le label est présent, le retirer à sa source (manifeste du namespace dans git), sinon ArgoCD
+le remet. Ensuite :
+
 ```bash
 oc get pods -n openshift-user-workload-monitoring
 ```
@@ -643,6 +655,12 @@ oc exec -n openshift-user-workload-monitoring prometheus-user-workload-0 -c prom
 ```
 
 Les cibles `rhbk-prod-service`, `rhbk-dev-service` et `external-secrets-metrics` valent 1.
+
+Si une cible manque ou vaut 0, l'état détaillé de chaque cible et la dernière erreur :
+
+```bash
+oc exec -n openshift-user-workload-monitoring prometheus-user-workload-0 -c prometheus -- curl -s http://localhost:9090/api/v1/targets | python3 -c 'import json,sys;[print(t["labels"].get("namespace"),t["labels"].get("pod"),t["health"],t["lastError"]) for t in json.load(sys.stdin)["data"]["activeTargets"] if t["labels"].get("namespace","").startswith("rhbk")]'
+```
 
 ```bash
 oc exec -n openshift-monitoring alertmanager-main-0 -c alertmanager -- amtool config routes show --alertmanager.url=http://localhost:9093
