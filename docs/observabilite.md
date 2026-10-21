@@ -3333,7 +3333,69 @@ nouvelle image. Console : **Observe → Traces**, instance `rhbk-tracing / tempo
 `rhbk`, requête `{resource.service.name="rhbk-dev"}` (autres requêtes : section 15.10 du
 guide).
 
-### 4.6 Si on s'arrête ici
+### 4.6 Générer et montrer des traces
+
+Démonstration de bout en bout, une fois Keycloak sur l'image avec le traçage (commit 2 de
+l'étape 4.4). Utiliser **dev** : 100 % de ses requêtes sont tracées, contre 10 % en prod.
+
+**1. Générer du trafic.** Le plus parlant est une vraie connexion à la console d'administration,
+`https://dev-rhbk-admin.<domaine>/admin/`. Compléter par quelques appels :
+
+```bash
+for i in 1 2 3 4 5; do curl -s -o /dev/null https://dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com/realms/master/.well-known/openid-configuration; done
+```
+
+**2. Afficher les traces.** Console, **Observe → Traces** : instance `rhbk-tracing / tempo`,
+tenant `rhbk`, période `Last 15 minutes`. Requêtes, de la plus large à la plus précise :
+
+| Requête | Ce qu'elle montre |
+|---|---|
+| `{resource.service.name="rhbk-dev"}` | toutes les traces de dev, y compris les tâches de fond (`DefaultKeycloakTransactionManager.commit`, `SELECT rhbk.JGROUPS_PING`…) |
+| `{resource.service.name="rhbk-dev" && span.http.request.method="GET"}` | uniquement les requêtes HTTP (`GET /realms/{realm}/…`, `GET /admin/…`) |
+| `{resource.service.name="rhbk-dev" && span.http.route=~"/realms/.*"}` | les requêtes sur les realms (applications, connexions) |
+| `{resource.service.name="rhbk-dev" && span.db.system="postgresql"}` | les traces qui touchent la base |
+| `{resource.service.name="rhbk-dev" && duration > 100ms}` | les requêtes lentes |
+| `{resource.service.name="rhbk-dev" && span.kc.realmName="master"}` | les traces d'un realm (attributs Keycloak `kc.realmName`, `kc.clientId`…) |
+| `{resource.service.name="rhbk-prod"}` | la prod (moins de traces : échantillonnage à 10 %) |
+
+**3. Montrer le bout en bout.** Ouvrir une trace de requête HTTP, de préférence celle de la
+connexion (`POST …/login-actions/authenticate`). La vue en cascade montre :
+
+1. le **span HTTP** : méthode, route, code de retour, durée totale ;
+2. les **spans internes de Keycloak** : authentification, transaction, sessions ;
+3. les **spans SQL** : chaque requête vers PostgreSQL (`db.statement`) et sa durée.
+
+Chaque span porte les attributs ajoutés par le Collector (`k8s.namespace.name`,
+`k8s.pod.name`) : on voit quel pod a traité la requête, utile en prod avec 2 replicas.
+
+**4. Lien avec les logs** (si la partie 3 est en place). Les logs écrits par Keycloak pendant une
+requête tracée contiennent l'identifiant de la trace (`mdc.traceId` dans le JSON). Copier
+l'identifiant d'une trace, puis dans **Observe → Logs** :
+
+```
+{kubernetes_namespace_name="rhbk-dev", kubernetes_container_name="keycloak"} |= "<traceId>"
+```
+
+Seules les requêtes pendant lesquelles Keycloak écrit un log (avertissement, erreur, connexion
+refusée…) ont des lignes correspondantes.
+
+**Valider sans la console** (même source que la console ; jeton de l'utilisateur, non affiché) :
+
+```bash
+oc port-forward -n rhbk-tracing svc/tempo-tempo-gateway 18082:8080 &
+```
+
+```bash
+curl -sk -G -H "Authorization: Bearer $(oc whoami -t)" "https://localhost:18082/api/traces/v1/rhbk/tempo/api/search" --data-urlencode 'q={resource.service.name="rhbk-dev"}' --data-urlencode "start=$(( $(date +%s) - 900 ))" --data-urlencode "end=$(date +%s)" | python3 -c 'import json,sys;[print(t["traceID"],t.get("rootTraceName")) for t in json.load(sys.stdin).get("traces",[])]'
+```
+
+```bash
+kill %1
+```
+
+Une ligne par trace des 15 dernières minutes : identifiant et nom de la requête racine.
+
+### 4.7 Si on s'arrête ici
 
 Les 4 parties sont en place.
 
