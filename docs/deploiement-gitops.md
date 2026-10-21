@@ -2164,8 +2164,42 @@ tenant `rhbk`. Requêtes **TraceQL** utiles :
 | Demandes de jeton lentes (plus de 500 ms) | `{resource.service.name="rhbk-prod" && name=~".*/token" && duration > 500ms}` |
 | Requêtes en erreur | `{resource.service.name="rhbk-prod" && status = error}` |
 
-**Échantillonnage** : 100 % des requêtes en dev, **10 % en prod** (`spec.tracing.samplerRatio`,
-`overlays/prod/patch-keycloak.yaml`), pour limiter le volume.
+**Échantillonnage** : 100 % des requêtes en dev, **10 % en prod**, pour limiter le volume.
+
+| Où | Valeur |
+|---|---|
+| CR Keycloak, `spec.tracing.samplerRatio` (`base/keycloak/keycloak.yaml`) | `1` : 100 %, valeur de dev |
+| patch prod (`overlays/prod/patch-keycloak.yaml`) | `0.1` : 10 % |
+
+```bash
+oc get keycloak -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,RATIO:.spec.tracing.samplerRatio'
+```
+
+*Comment se fait la sélection.* C'est **Keycloak** qui décide, au début de chaque requête ; le
+Collector et Tempo ne reçoivent que les traces retenues. L'échantillonneur est celui
+d'OpenTelemetry par défaut, `traceidratio` (option `tracing-sampler-type`, non modifiée) :
+l'identifiant de trace, généré au hasard, est comparé à un seuil (10 % de la plage pour `0.1`).
+Conséquences :
+
+- en pratique un **tirage au sort uniforme** : environ 1 requête sur 10 sur la durée, sans
+  biais d'URL, d'utilisateur, de realm ou de pod (sur peu de requêtes, la proportion varie) ;
+- une trace est gardée **en entier ou pas du tout** (tous ses spans suivent la décision) ;
+- les deux pods de prod décident de la même façon (la décision ne dépend que de l'identifiant) ;
+- une requête lente ou en erreur n'a **pas plus de chances** d'être gardée : pour observer une
+  requête précise, la reproduire plusieurs fois, ou tester en dev (100 %) ;
+- la décision d'une application cliente tracée qui transmet son contexte (`traceparent`) est
+  **ignorée** : Keycloak garde le même identifiant de trace mais refait son propre tirage.
+
+`samplerRatio` est une option **d'exécution** : la changer donne un rolling update (sans
+coupure en prod). Elle ne dépend pas du stockage de Tempo ; avec un volume de taille fixe
+(TempoMonolithic sur PV), elle limite aussi le volume écrit.
+
+*Autres méthodes, non mises en place* :
+
+| Méthode | Principe | Mise en œuvre |
+|---|---|---|
+| `parentbased_traceidratio` | suit la décision de l'appelant quand il transmet un contexte ; tirage à `samplerRatio` sinon | `tracing-sampler-type` est une option **de build** : `ENV KC_TRACING_SAMPLER_TYPE=parentbased_traceidratio` dans le Containerfile, rebuild, nouveau digest (recreate en prod) |
+| Échantillonnage *a posteriori* (« tail sampling ») | le Collector attend la fin de chaque trace pour décider : garder **toutes les traces en erreur ou lentes** et une fraction des autres | Keycloak envoie tout (`samplerRatio: 1`), filtrage dans le Collector (processeur `tail_sampling`) ; plus de mémoire pour le Collector, à tester avant usage |
 
 **Activer le traçage, dans l'ordre** (section 15.8) :
 

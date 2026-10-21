@@ -3291,7 +3291,8 @@ oc patch application tracing -n openshift-gitops --type merge -p '{"operation":{
     samplerRatio: 1
 ```
 
-et, pour la prod (10 % des requêtes tracées), à la fin de `overlays/prod/patch-keycloak.yaml` :
+et, pour la prod (10 % des requêtes tracées, tirées au sort par Keycloak : section 15.10 du
+guide), à la fin de `overlays/prod/patch-keycloak.yaml` :
 
 ```yaml
 - op: replace
