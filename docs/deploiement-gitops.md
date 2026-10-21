@@ -2773,7 +2773,7 @@ les sections référencées et dans le README de `rhbk-platform`.
 | 2 | `grafana-operator`, puis `grafana` | Grafana derrière le proxy OAuth, source Thanos Querier, tableaux officiels Keycloak |
 | 3 | `coo-operator`, puis `observability-console` | Cluster Observability Operator, vue d'ensemble Perses dans la console |
 | 4 | `loki-operator`, `logging-operator`, puis `logging` | LokiStack, collecteur (applications + `openshift-gitops`), plugin Logs de la console |
-| 5 | `tempo-operator`, `otel-operator`, puis `tracing` | TempoStack, OpenTelemetry Collector, plugin Traces de la console |
+| 5 | `tempo-operator`, `otel-operator`, puis `tracing` (ou `tracing-pv`, option B sans stockage objet) | TempoStack (ou TempoMonolithic sur PVC), OpenTelemetry Collector, plugin Traces de la console |
 
 **Application** (`rhbk-gitops`) : chaque partie d'`observabilite.md` ajoute ses changements
 Keycloak au socle (étapes 1.3, 2.2, 3.4 et 4.4), selon les règles de la section 15.8 :

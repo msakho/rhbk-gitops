@@ -50,7 +50,7 @@ Vue d'ensemble, pièges rencontrés et renvois : guide principal, **annexe D**
 | Socle applicatif en place (guide principal, étapes 1 à 13) | toutes | `oc get keycloak -A` |
 | Plateforme `rhbk-platform` en place : bootstrap, ESO, Vault, opérateurs RHBK (README de `rhbk-platform`, étapes 1 à 6) | toutes | `oc get applications -n openshift-gitops` |
 | Stockage en bloc `ocs-storagecluster-ceph-rbd` | 1, 3, 4 | `oc get storageclass ocs-storagecluster-ceph-rbd` |
-| Stockage objet ODF / NooBaa (classe `openshift-storage.noobaa.io`) | 3, 4 | `oc get noobaa -n openshift-storage` |
+| Stockage objet ODF / NooBaa (classe `openshift-storage.noobaa.io`) | 3, 4 (option A) | `oc get noobaa -n openshift-storage` |
 | `podman` et accès en écriture à `quay.io/msakho0/mskeycloak` (rebuild de l'image) | 2, 4 | `podman login quay.io` |
 
 ### 0.3 Conventions
@@ -2701,7 +2701,8 @@ Logs centralisés en plus des parties déployées. Pas de traces (partie 4).
 
 ### 4.1 Prérequis
 
-- Stockage objet NooBaa (section 0.2), ESO.
+- Option A : stockage objet NooBaa (section 0.2) et ESO. Option B : seulement une classe de
+  stockage en bloc (`ocs-storagecluster-ceph-rbd`, ou `thin-csi`…) ; voir 4.3.
 - Pour l'affichage dans la console : le Cluster Observability Operator (étape 2.4.1).
 
 ### 4.2 Opérateurs (Applications `tempo-operator` et `otel-operator`)
@@ -2866,7 +2867,27 @@ spec:
       - ServerSideApply=true
 ```
 
-### 4.3 Stockage, Collector et affichage (Application `tracing`)
+### 4.3 Stockage, Collector et affichage : option A ou option B
+
+Deux façons de stocker les traces. **Choisir l'une ou l'autre**, jamais les deux : elles utilisent
+le même namespace (`rhbk-tracing`), le même Collector et les mêmes droits, et l'API refuse un
+TempoMonolithic à côté d'un TempoStack du même nom. Keycloak, la console et les requêtes TraceQL
+sont identiques dans les deux cas.
+
+| | **Option A : TempoStack + stockage objet** (référence) | **Option B : TempoMonolithic + volume persistant** |
+|---|---|---|
+| Application, dossier | `tracing`, `tracing/` | `tracing-pv`, `tracing-pv/` |
+| Stockage des traces | bucket S3 (NooBaa `tempo-rhbk`), identifiants convertis par ESO | PVC classique (`backend: pv`, 10 Gi) : ni bucket, ni secret S3 |
+| Architecture | composants séparés (distributor, ingester, querier, compactor, passerelle…) | un seul pod (Tempo, passerelle, OPA) |
+| Haute disponibilité, montée en charge | possibles (tailles `1x.pico` et plus) | non : traces non reçues pendant un redémarrage du pod |
+| Rétention (72 h) | `spec.retention` | `extraConfig` (paramètre Tempo `block_retention`) |
+| Passerelle (export du Collector) | port **8090** | port **4317** |
+| Adapté à | production, volumes importants | test, petits volumes, cluster sans stockage objet |
+
+L'option B a été testée à côté de l'option A, dans un namespace séparé : traces reçues, lues dans
+la console (**Observe → Traces**), conservées après suppression du pod Tempo.
+
+#### 4.3.1 Option A : TempoStack et stockage objet (Application `tracing`)
 
 | Fichier | Rôle |
 |---|---|
@@ -3276,6 +3297,302 @@ oc patch application otel-operator -n openshift-gitops --type merge -p '{"operat
 oc patch application tracing -n openshift-gitops --type merge -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"revision":"main"}}}'
 ```
 
+#### 4.3.2 Option B : TempoMonolithic et volume persistant (Application `tracing-pv`)
+
+| Fichier | Rôle |
+|---|---|
+| `namespace.yaml` | namespace `rhbk-tracing` (identique à l'option A) |
+| `tempomonolithic.yaml` | TempoMonolithic `tempo`, volume de 10 Gi, rétention 72 h, tenant `rhbk`, droits d'écriture et de lecture (mêmes ClusterRoles que l'option A) ; `timeout: 0s` déclaré (valeur ajoutée par l'API, sinon `OutOfSync` permanent) |
+| `collector.yaml` | identique à l'option A, sauf le port de la passerelle : **4317** |
+| `uiplugin-distributed-tracing.yaml` | traces dans la console (identique à l'option A) |
+
+Pour une autre classe de stockage (par exemple `thin-csi`), adapter `storageClassName`.
+
+`rhbk-platform/tracing-pv/kustomization.yaml`
+```yaml
+# Option B of the traces (part 4): TempoMonolithic on a persistent volume, no object storage.
+# Replaces tracing/ (option A, TempoStack on S3): deploy one or the other, never both
+# (same namespace, Collector and ClusterRoles). Keycloak is unchanged (same Collector address).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: rhbk-platform
+resources:
+  - namespace.yaml
+  - tempomonolithic.yaml
+  - collector.yaml
+  - uiplugin-distributed-tracing.yaml
+```
+
+`rhbk-platform/tracing-pv/namespace.yaml`
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rhbk-tracing
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+```
+
+`rhbk-platform/tracing-pv/tempomonolithic.yaml`
+```yaml
+# Trace store, option B: TempoMonolithic (a single pod: Tempo, gateway, OPA) writing traces on a
+# persistent volume (backend pv): no bucket, no S3 secret. No high availability: traces are not
+# received while the pod restarts. Multi-tenant "openshift" mode, single tenant "rhbk", as option A.
+apiVersion: tempo.grafana.com/v1alpha1
+kind: TempoMonolithic
+metadata:
+  name: tempo
+  namespace: rhbk-tracing
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  storage:
+    traces:
+      backend: pv
+      size: 10Gi
+      storageClassName: ocs-storagecluster-ceph-rbd
+  multitenancy:
+    enabled: true
+    mode: openshift
+    authentication:
+      - tenantName: rhbk
+        tenantId: 1e5c2f3a-9d1b-4f6e-8a7c-2b4d6e8f0a12
+  # No retention field in TempoMonolithic: Tempo setting (the operator warns that extraConfig
+  # overrides its configuration; this single key was tested).
+  extraConfig:
+    tempo:
+      compactor:
+        compaction:
+          block_retention: 72h
+  # Default added by the API: declared to avoid a permanent OutOfSync in ArgoCD.
+  timeout: 0s
+---
+# Allows writing traces to tenant "rhbk" (used by the collector) ...
+# Same names as option A (tracing/tempostack.yaml): they apply to any Tempo instance with tenant "rhbk".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tempostack-rhbk-traces-writer
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+rules:
+  - apiGroups: ["tempo.grafana.com"]
+    resources: ["rhbk"]
+    resourceNames: ["traces"]
+    verbs: ["create"]
+---
+# ... and reading them (bind it to users or groups who must see traces; cluster admins already can).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tempostack-rhbk-traces-reader
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+rules:
+  - apiGroups: ["tempo.grafana.com"]
+    resources: ["rhbk"]
+    resourceNames: ["traces"]
+    verbs: ["get"]
+```
+
+`rhbk-platform/tracing-pv/collector.yaml`
+```yaml
+# OpenTelemetry Collector: receives OTLP from Keycloak (grpc 4317, http 4318), adds Kubernetes
+# attributes (namespace, pod...), and forwards to the Tempo gateway with its ServiceAccount token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: rhbk-tracing
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector-tempostack-rhbk-traces-writer
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tempostack-rhbk-traces-writer
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: rhbk-tracing
+---
+# k8sattributes processor: read pods, namespaces and replicasets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector-k8sattributes
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector-k8sattributes
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector-k8sattributes
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: rhbk-tracing
+---
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel
+  namespace: rhbk-tracing
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  mode: deployment
+  serviceAccount: otel-collector
+  config:
+    extensions:
+      bearertokenauth:
+        filename: /var/run/secrets/kubernetes.io/serviceaccount/token
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 15
+      k8sattributes: {}
+      batch: {}
+    exporters:
+      otlp/tempo:
+        # TempoMonolithic gateway: OTLP gRPC on port 4317 (8090 with a TempoStack).
+        endpoint: tempo-tempo-gateway.rhbk-tracing.svc.cluster.local:4317
+        tls:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+        auth:
+          authenticator: bearertokenauth
+        headers:
+          X-Scope-OrgID: rhbk
+    service:
+      extensions: [bearertokenauth]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, batch]
+          exporters: [otlp/tempo]
+```
+
+`rhbk-platform/tracing-pv/uiplugin-distributed-tracing.yaml`
+```yaml
+# Console plugin of the Cluster Observability Operator: traces from the Tempo instance in the
+# OpenShift console (Observe -> Traces). Part of the traces (part 4); needs the Cluster
+# Observability Operator (coo-operator) for the UIPlugin CRD.
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: distributed-tracing
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  type: DistributedTracing
+```
+
+`rhbk-platform/argocd/applications/tracing-pv.yaml`
+```yaml
+# Traces, option B (docs/observabilite.md, part 4): TempoMonolithic on a persistent volume and
+# OpenTelemetry Collector, namespace rhbk-tracing. Replaces the "tracing" Application (option A):
+# list one or the other in argocd/kustomization.yaml, never both. Not listed by default.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tracing-pv
+  namespace: openshift-gitops
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/msakho/rhbk-platform.git
+    targetRevision: main
+    path: tracing-pv
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rhbk-tracing
+  syncPolicy:
+    # Platform: manual sync (review the diff, then Sync).
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 6
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 5m
+```
+
+Déclarer l'Application dans `rhbk-platform/argocd/kustomization.yaml` (sous `resources:`), **à la
+place** de `applications/tracing.yaml` :
+
+```yaml
+  - applications/tempo-operator.yaml
+  - applications/otel-operator.yaml
+  - applications/tracing-pv.yaml
+```
+
+AppProject : mêmes entrées que l'option A (namespaces `openshift-tempo-operator`,
+`openshift-opentelemetry-operator`, `rhbk-tracing` ; `ClusterRole`, `ClusterRoleBinding`, `UIPlugin`).
+Commit, push, puis :
+
+```bash
+oc patch application tempo-operator -n openshift-gitops --type merge -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"revision":"main"}}}'
+oc patch application otel-operator -n openshift-gitops --type merge -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"revision":"main"}}}'
+oc patch application tracing-pv -n openshift-gitops --type merge -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"revision":"main"}}}'
+```
+
+**Passer de l'option A à l'option B sur un cluster déjà en place** (les traces stockées dans le
+bucket sont perdues) :
+
+1. dans `argocd/kustomization.yaml`, remplacer `applications/tracing.yaml` par
+   `applications/tracing-pv.yaml` ; commit, push. `platform-root` retire l'Application `tracing`
+   sans supprimer ses ressources (pas de finalizer) ;
+2. supprimer le TempoStack (l'API refuse sinon le TempoMonolithic du même nom) :
+```bash
+oc delete tempostack tempo -n rhbk-tracing
+```
+
+3. synchroniser `tracing-pv` : elle reprend le namespace, le Collector et les droits, et crée le
+   TempoMonolithic. Les traces sont de nouveau reçues une fois le pod `tempo-tempo-0` prêt ;
+4. facultatif : retirer le bucket de l'option A et la conversion de ses identifiants (fichiers
+   `bucket.yaml` et `tempo-s3-secret.yaml`) :
+```bash
+oc delete externalsecret tempo-s3 -n rhbk-tracing && oc delete secretstore local-secrets -n rhbk-tracing && oc delete rolebinding,role,serviceaccount eso-local-secret-reader -n rhbk-tracing
+```
+
+```bash
+oc delete objectbucketclaim tempo-bucket -n rhbk-tracing
+```
+
+
 ### 4.4 Keycloak : traçage, en deux commits
 
 **Commit 1, options seules** (ignorées tant que l'image n'a pas le traçage) : dans
@@ -3321,8 +3638,16 @@ En prod, ce commit provoque un recreate (coupure d'environ 1 minute).
 
 ### 4.5 Vérifier
 
+Option A :
+
 ```bash
 oc get tempostack tempo -n rhbk-tracing && oc get opentelemetrycollector otel -n rhbk-tracing
+```
+
+Option B (pod `tempo-tempo-0` à 3/3, PVC `Bound`) :
+
+```bash
+oc get tempomonolithic tempo -n rhbk-tracing && oc get pods,pvc -n rhbk-tracing
 ```
 
 ```bash
@@ -3406,7 +3731,7 @@ Les 4 parties sont en place.
 
 | Étape | Faire | Ne pas faire |
 |---|---|---|
-| Plateforme | 1.2 (`platform-monitoring`), 2.3 (`grafana-operator`, `grafana`), 2.4 (`coo-operator`, `observability-console`) | 3.2, 3.3, 4.2, 4.3 |
+| Plateforme | 1.2 (`platform-monitoring`), 2.3 (`grafana-operator`, `grafana`), 2.4 (`coo-operator`, `observability-console`) | 3.2, 3.3, 4.2, 4.3 (A ou B) |
 | Containerfile | lignes `[Observability part 2]` (2.2), en plus des lignes `[Observability part 1]` du socle | pas de `KC_TRACING_ENABLED` (partie 4) |
 | CR Keycloak | `metrics-enabled`, `prometheusrule.yaml` (1.3) ; `features`, `http-metrics-histograms-enabled` (2.2) | pas de bloc `tracing` (partie 4), pas de `log-console-output` (partie 3) |
 | Overlay prod | — | pas de patch `samplerRatio` (partie 4) |
