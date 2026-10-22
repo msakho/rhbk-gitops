@@ -50,6 +50,8 @@ Les routes sont en **reencrypt** : le routeur présente le certificat Let's Encr
 
 L'Ingress de l'opérateur est désactivé (`ingress.enabled: false`).
 
+Raisons, démarche pas à pas et résultats mesurés : guide, section 1.4.
+
 ## Prérequis (plateforme)
 
 Les namespaces, l'opérateur RHBK (un par namespace, canal `stable-v26.6`), External Secrets Operator, Vault et le

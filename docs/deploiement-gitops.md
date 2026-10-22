@@ -109,29 +109,108 @@ Kustomize assemble base + overlay au moment où ArgoCD lit le dépôt.
 L'observabilité ajoute ensuite une `PrometheusRule` (alertes) et des options au CR
 (`observabilite.md`).
 
-### 1.4 Isolation de la console admin
+### 1.4 Exposition et sécurité : pourquoi trois routes
 
-```
-navigateur ──TLS Let's Encrypt──▶ routeur ──TLS service-ca──▶ Keycloak
-                                    │
-                                    └─ déchiffre, lit le chemin HTTP,
-                                       choisit la Route qui correspond
-```
+#### Le problème
 
-Les routes sont en **reencrypt** : le routeur termine le TLS, lit le chemin, puis
-rechiffre vers Keycloak. Sur le hostname public, seules `/realms` et `/resources` ont
-une route : `/admin`, `/`, `/metrics`… reçoivent une **503 du routeur** et
-n'atteignent jamais Keycloak.
+Par défaut, une instance Keycloak est exposée par **une seule route** (l'Ingress créé par
+l'opérateur, en passthrough) : tout ce que Keycloak sert est alors accessible depuis internet,
+sur le même hostname que les applications :
 
-Deux certificats sont en jeu :
+| Chemin | Contenu | Public ? |
+|---|---|---|
+| `/realms/...` | connexion des utilisateurs, points OIDC/SAML (`.well-known`, `token`, `auth`…), console de compte | **oui**, indispensable |
+| `/resources/...` | CSS, JavaScript et images des pages de connexion | **oui**, indispensable |
+| `/admin/...` | **console d'administration** et **API REST d'administration** | **non** |
+| `/` | page d'accueil, qui renvoie vers la console d'administration | non |
+| `/metrics`, `/health` | métriques et sondes (port de gestion 9000) | non |
+
+La console et l'API d'administration exposées sur internet permettent de tenter des connexions
+sur le realm `master` (le plus sensible) et donnent une surface d'attaque inutile. La
+documentation Keycloak (« Configuring a reverse proxy », chemins exposés) recommande de n'exposer
+publiquement que `/realms` et `/resources`.
+
+#### L'objectif
+
+- Un **hostname public** (`<env>-rhbk.<domaine>`) pour les applications et les utilisateurs, limité
+  à `/realms` et `/resources`.
+- Un **hostname d'administration** séparé (`<env>-rhbk-admin.<domaine>`) pour la console, qu'on
+  peut restreindre à part (adresses IP, voir plus bas).
+- Le **chiffrement de bout en bout**, jusqu'au pod Keycloak.
+
+#### La démarche, étape par étape
+
+1. **Point de départ : une route passthrough**, pour tester l'instance au plus vite. En
+   passthrough, le routeur ne déchiffre pas : il ne voit que du TLS et ne peut **pas filtrer par
+   chemin**. Il faut donc que le routeur lise le HTTP.
+2. **Routes en `reencrypt`** : le routeur termine le TLS du navigateur (certificat Let's Encrypt),
+   lit le chemin, choisit la route, puis **rechiffre** vers Keycloak. Le trafic reste chiffré de
+   bout en bout. (`edge` filtrerait aussi, mais le trafic routeur → pod serait en clair.)
+3. **Un certificat interne pour Keycloak** : en reencrypt, le routeur doit faire confiance au
+   certificat présenté par le pod. On crée un Service interne (`rhbk-internal`, section 8.2) dont
+   l'annotation fait générer par OpenShift (service-ca) le certificat `rhbk-internal-tls`, auquel
+   le routeur fait confiance automatiquement. Le Service de l'opérateur ne convient pas : il
+   retirerait l'annotation.
+4. **Le certificat public lu par le routeur** (`spec.tls.externalCertificate`) plutôt que copié
+   dans chaque route : le routeur lit le Secret `rhbk-tls-secret` (créé par ESO depuis Vault), ce qui
+   demande un droit de lecture (Role et RoleBinding, section 8.3). Un renouvellement du certificat
+   est pris sans toucher aux routes.
+5. **Trois routes** (section 8.5) :
+
+   ```
+   <env>-rhbk.<domaine>/realms     ──▶ route rhbk-public-realms    ─┐
+   <env>-rhbk.<domaine>/resources  ──▶ route rhbk-public-resources ─┼─▶ Service rhbk-internal:8443 ──▶ Keycloak
+   <env>-rhbk-admin.<domaine>/*    ──▶ route rhbk-admin            ─┘
+   <env>-rhbk.<domaine>/admin, /, /metrics…  ──▶ aucune route : 503 du routeur
+   ```
+
+   Une route OpenShift n'a qu'un seul `path` : deux chemins publics demandent donc deux routes,
+   sur le même hostname. La route admin n'a pas de `path` : elle prend tout, la console ayant
+   besoin de `/admin`, `/realms/master` et `/resources`.
+6. **Désactiver l'Ingress de l'opérateur** (`ingress.enabled: false`) : il recréerait une route
+   passthrough qui exposerait tous les chemins.
+7. **Déclarer le hostname admin dans Keycloak** (`hostname.admin` dans le CR) : la console
+   d'administration charge alors ses pages et appelle l'API sur le hostname admin, et non sur le
+   hostname public, où elles seraient bloquées. `hostname.strict: true` empêche Keycloak de
+   déduire ses URL des en-têtes de la requête.
+8. **Tester** (section 13.4) les chemins publics, bloqués et admin.
+
+Deux certificats sont donc en jeu :
 
 | Certificat | Présenté par | Source |
 |---|---|---|
 | Public (Let's Encrypt) | le routeur, au navigateur | secret `rhbk-tls-secret`, lu via `spec.tls.externalCertificate` |
 | Interne | Keycloak, au routeur | secret `rhbk-internal-tls`, généré automatiquement par le service-ca |
 
-L'Ingress créé par défaut par l'opérateur est désactivé (`ingress.enabled: false`) :
-il ferait une route passthrough qui exposerait tous les chemins.
+#### Résultat mesuré (prod)
+
+| URL | Code | Explication |
+|---|---|---|
+| `https://prod-rhbk…/` | 503 | aucune route : bloqué par le routeur |
+| `https://prod-rhbk…/admin/master/console/` | 503 | console bloquée |
+| `https://prod-rhbk…/admin/realms` | 503 | API d'administration bloquée |
+| `https://prod-rhbk…/metrics`, `/health` | 503 | bloqués |
+| `https://prod-rhbk…/realms/master/.well-known/openid-configuration` | 200 | découverte OIDC |
+| `https://prod-rhbk…/realms/master/protocol/openid-connect/auth?…` | 302 | début de connexion (redirection vers la page de connexion) |
+| `https://prod-rhbk…/realms/master/account/` | 200 | console de compte |
+| `https://prod-rhbk…/resources/…/react.production.min.js` | 200 | ressources des pages |
+| `https://prod-rhbk-admin…/admin/master/console/` | 200 | console d'administration |
+| `http://prod-rhbk…/…` | 302 | redirection vers HTTPS (`insecureEdgeTerminationPolicy: Redirect`) |
+
+Le 503 est renvoyé **par le routeur** : la requête n'atteint jamais Keycloak.
+
+#### Ce qui reste à décider ou à renforcer
+
+- **Le hostname admin reste joignable depuis internet**, simplement séparé. Pour le restreindre à
+  certaines adresses (VPN, bureau), décommenter l'annotation `ip_whitelist` de la route
+  `rhbk-admin` (section 8.5) ; on peut aussi ne publier ce hostname que sur un routeur interne.
+- **Adresse IP des clients** : derrière un routeur qui déchiffre, Keycloak doit lire les en-têtes
+  `X-Forwarded-*`, et le routeur doit les **remplacer** pour qu'un client ne puisse pas les
+  falsifier (section 15.11). En passthrough, l'IP du client serait perdue.
+- **Authentification par certificat client (mTLS)** : en reencrypt, le certificat du client
+  s'arrête au routeur et n'atteint pas Keycloak. Si ce mode d'authentification devient nécessaire,
+  il faut soit une route passthrough dédiée (sans filtrage par chemin), soit faire transmettre le
+  certificat par un en-tête (configuration particulière du routeur et de Keycloak).
 
 ### 1.5 Ordre de synchronisation (sync-waves)
 
@@ -683,7 +762,8 @@ spec:
 ### 8.5 `base/keycloak/routes.yaml`
 
 Trois routes en reencrypt. Les deux routes publiques partagent le même hostname,
-avec un `path` différent. La route admin n'a pas de `path` : elle prend tout.
+avec un `path` différent. La route admin n'a pas de `path` : elle prend tout. Raisons et démarche :
+section 1.4.
 
 L'annotation `haproxy.router.openshift.io/set-forwarded-headers: replace` fait **remplacer** par le
 routeur l'en-tête `X-Forwarded-For` envoyé par le client (par défaut, il le complète). Keycloak
