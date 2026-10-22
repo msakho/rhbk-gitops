@@ -3297,6 +3297,33 @@ oc patch application otel-operator -n openshift-gitops --type merge -p '{"operat
 oc patch application tracing -n openshift-gitops --type merge -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"revision":"main"}}}'
 ```
 
+**Taille du bucket.** Un bucket S3 n'a **pas de taille fixée à l'avance**, contrairement à un
+PVC. `bucket.yaml` (ObjectBucketClaim) ne demande ni taille ni quota, et la classe de bucket NooBaa
+(`noobaa-default-bucket-class`) n'en impose pas non plus. Derrière NooBaa, le stockage réel est ici
+un bucket AWS S3 (backing store `noobaa-default-backing-store`, type `aws-s3`) : le bucket grossit
+avec les écritures. Ce qui borne son volume est la **rétention de 72 h** (les blocs plus anciens
+sont supprimés par le compactor) et l'**échantillonnage** (10 % en prod, section 4.4). Mesuré sur
+le cluster de démonstration : environ 18 Mio pour `tempo-rhbk` (90 Mio pour `loki-rhbk`).
+
+Voir l'occupation dans **Observe → Metrics** :
+
+```
+NooBaa_bucket_used_bytes{bucket_name="tempo-rhbk"}
+```
+
+À ne pas confondre : le seul volume de taille fixe de l'option A est le **PVC de l'ingester**
+(`data-tempo-tempo-ingester-0`, 10 Gi, classe `storageClassName` du TempoStack, taille par défaut
+car `storageSize` n'est pas renseigné). Il contient le journal d'écriture (WAL) et les traces
+récentes avant leur envoi dans le bucket, pas les traces conservées :
+
+```bash
+oc get pvc -n rhbk-tracing
+```
+
+Pour **plafonner** le bucket, il faut un quota NooBaa (`spec.additionalConfig.maxSize` de
+l'ObjectBucketClaim, ou quota sur la classe de bucket). Non mis en place ni testé ici : une fois le
+quota atteint, Tempo ne peut plus écrire et les nouvelles traces sont perdues.
+
 #### 4.3.2 Option B : TempoMonolithic et volume persistant (Application `tracing-pv`)
 
 | Fichier | Rôle |
