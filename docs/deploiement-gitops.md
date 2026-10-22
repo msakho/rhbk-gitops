@@ -956,6 +956,12 @@ namespace: rhbk-dev
     limits:
       cpu: "1"
       memory: "1500M"
+# Client IP: read the X-Forwarded-* headers set by the OpenShift router (reencrypt routes).
+# Safe only with the router replacing these headers (patch-routes.yaml), see guide 15.11.
+- op: add
+  path: /spec/proxy
+  value:
+    headers: xforwarded
 ```
 
 `overlays/dev/patch-routes.yaml`
@@ -964,6 +970,11 @@ namespace: rhbk-dev
 - op: replace
   path: /spec/host
   value: dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+# The router replaces X-Forwarded-For (default: appends to the client value, which a client could
+# forge). Required with proxy headers enabled in the Keycloak CR (patch-keycloak.yaml).
+- op: add
+  path: /metadata/annotations/haproxy.router.openshift.io~1set-forwarded-headers
+  value: replace
 ```
 
 `overlays/dev/patch-route-admin.yaml`
@@ -2212,6 +2223,47 @@ Exemple observé : une demande de jeton pour un utilisateur inexistant dure envi
 dont l'essentiel dans `TokenEndpoint.processGrantRequest` alors que les requêtes SQL
 prennent moins de 1 ms : Keycloak calcule volontairement un hachage de mot de passe factice
 pour qu'on ne puisse pas deviner, à la durée de réponse, si un compte existe.
+
+### 15.11 Adresse IP des clients (en-têtes de proxy)
+
+Avec des routes **reencrypt** (ou edge), le routeur OpenShift déchiffre la requête et ajoute les
+en-têtes `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port` et
+`Forwarded`. Keycloak ne les lit que si on le lui demande (`proxy-headers`). Sans cela, il voit
+l'**IP du pod routeur** comme adresse du client (événements, sessions affichées dans la console,
+logs). Les URL restent correctes dans les deux cas : `hostname` est une URL complète avec
+`strict: true`. En **passthrough**, le routeur ne voit que du chiffré : il ne peut ajouter aucun
+en-tête, et l'IP du client est perdue.
+
+Deux réglages, **appliqués en dev** (prod : à reporter dans `overlays/prod`, ou à passer dans la base) :
+
+| Réglage | Où | Pourquoi |
+|---|---|---|
+| `spec.proxy.headers: xforwarded` | CR Keycloak (`overlays/dev/patch-keycloak.yaml`) | Keycloak prend l'IP du client dans `X-Forwarded-For` (option d'exécution : rolling update) |
+| annotation `haproxy.router.openshift.io/set-forwarded-headers: replace` | chaque Route (`overlays/dev/patch-routes.yaml`) | le routeur **remplace** `X-Forwarded-For` au lieu de compléter la valeur envoyée par le client, qu'un client pourrait falsifier |
+
+Le second réglage est indispensable avec le premier : par défaut, le routeur ajoute l'IP réelle à la
+suite d'un éventuel `X-Forwarded-For` envoyé par le client, et Keycloak lit la première valeur. Un
+client pourrait alors se faire passer pour n'importe quelle adresse.
+
+Option supplémentaire, non appliquée : `proxy-trusted-addresses` (adresses des proxys de confiance,
+par exemple le réseau des pods). Keycloak ignore alors les en-têtes venant d'ailleurs ; utile parce
+que la NetworkPolicy de l'opérateur ouvre le port 8443 à tout le cluster.
+
+**Vérifier** : une demande de jeton pour un client inexistant (aucun identifiant) produit un
+événement `CLIENT_LOGIN_ERROR`, journalisé avec l'IP retenue par Keycloak :
+
+```bash
+curl -s -o /dev/null -H "X-Forwarded-For: 1.2.3.4" -d "grant_type=client_credentials&client_id=ip-test" https://dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com/realms/master/protocol/openid-connect/token
+```
+
+```bash
+oc logs -n rhbk-dev rhbk-dev-0 --since=1m | grep -o 'clientId=\\"ip-test\\"[^}]*ipAddress=\\"[^\\]*'
+```
+
+Résultat observé : avant les réglages, `ipAddress` était l'IP d'un pod routeur (`10.131.0.16`) ;
+après, c'est l'**IP publique du client**, y compris avec le faux `X-Forwarded-For: 1.2.3.4`, qui est
+ignoré. Mêmes résultats sur le hostname admin. Les traces (`client.address`) montraient déjà la
+bonne IP : l'instrumentation OpenTelemetry lit elle-même `X-Forwarded-For`.
 
 ## 16. Dépannage
 
