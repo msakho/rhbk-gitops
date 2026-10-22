@@ -1555,24 +1555,46 @@ oc exec -n rhbk-dev rhbk-dev-0 -- cat /opt/keycloak/version.txt
 
 ### 13.4 Isolation et accès
 
-Ce script teste les deux environnements :
+Ce scénario vérifie le découpage en trois routes (raisons et démarche : section 1.4). Il a deux
+parties : un test automatique des chemins, puis une vérification dans le navigateur.
+
+**1. Test des chemins**, pour les deux environnements :
 
 ```bash
 D=apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
 for e in prod dev; do P=https://$e-rhbk.$D; A=https://$e-rhbk-admin.$D; echo "== $e"
-for u in "$P/admin/master/console/" "$P/metrics" "$P/realms/master/.well-known/openid-configuration" "$A/admin/master/console/"; do
+for u in "$P/" "$P/admin/master/console/" "$P/admin/realms" "$P/metrics" "$P/health" "$P/realms/master/.well-known/openid-configuration" "$P/realms/master/account/" "$A/admin/master/console/" "$A/realms/master/.well-known/openid-configuration" "http://$e-rhbk.$D/realms/master/.well-known/openid-configuration"; do
   printf "  %s tls=%s  %s\n" $(curl -s -o /dev/null -w '%{http_code} %{ssl_verify_result}' "$u") "$u"; done; done
 ```
 
-Résultats attendus :
+Résultats attendus (obtenus en dev et en prod) :
 
-| URL | Code |
-|---|---|
-| `https://<env>-rhbk…/admin/master/console/` | **503** (console isolée) |
-| `https://<env>-rhbk…/metrics` | **503** |
-| `https://<env>-rhbk…/realms/master/.well-known/openid-configuration` | **200** |
-| `https://<env>-rhbk-admin…/admin/master/console/` | **200** |
-| `tls=` | **0** (certificat valide) |
+| URL | Code | Pourquoi |
+|---|---|---|
+| `https://<env>-rhbk…/` | **503** | aucune route pour `/` |
+| `https://<env>-rhbk…/admin/master/console/` | **503** | console bloquée sur le hostname public |
+| `https://<env>-rhbk…/admin/realms` | **503** | API d'administration bloquée |
+| `https://<env>-rhbk…/metrics`, `/health` | **503** | non exposés |
+| `https://<env>-rhbk…/realms/master/.well-known/openid-configuration` | **200** | découverte OIDC (route `rhbk-public-realms`) |
+| `https://<env>-rhbk…/realms/master/account/` | **200** | console de compte des utilisateurs |
+| `https://<env>-rhbk-admin…/admin/master/console/` | **200** | console d'administration (route `rhbk-admin`) |
+| `https://<env>-rhbk-admin…/realms/master/.well-known/…` | **200** | la route admin prend tous les chemins |
+| `http://<env>-rhbk…/…` | **302** | redirection vers HTTPS |
+| `tls=` | **0** | certificat valide pour chaque hostname |
+
+Les 503 viennent **du routeur** : ces requêtes n'atteignent jamais Keycloak.
+
+**2. Vérification dans le navigateur** (exemple en dev) :
+
+1. `https://dev-rhbk.<domaine>/admin/` : page **« Application is not available »** (503
+   d'OpenShift) ; la console n'est pas accessible par le hostname public.
+2. `https://dev-rhbk-admin.<domaine>/admin/` : la console s'ouvre et on peut se connecter. Dans
+   les outils de développement (onglet **Network**), toutes ses requêtes partent vers
+   `dev-rhbk-admin…` : effet de `hostname.admin` dans le CR (section 8.4).
+3. `https://dev-rhbk.<domaine>/realms/master/account/` : page de connexion des **utilisateurs**,
+   avec ses styles (servis par `/resources`) ; le côté public fonctionne.
+
+Sur un autre cluster, adapter le domaine `D` et les hostnames.
 
 ### 13.5 Connexion
 
