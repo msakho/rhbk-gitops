@@ -592,6 +592,9 @@ Le CR Keycloak. Points clés :
   (section 1.6).
 - `bootstrapAdmin` : admin temporaire, utilisé seulement au premier démarrage (base vide).
 - `hostname.strict: true` : les URL ne sont pas déduites des en-têtes des requêtes.
+- `proxy.headers: xforwarded` : Keycloak prend l'IP du client dans l'en-tête `X-Forwarded-For`
+  posé par le routeur, sans cela il verrait l'IP du routeur (section 15.11). À n'activer qu'avec
+  l'annotation `set-forwarded-headers: replace` des routes (section 8.5).
 - `db.host: postgres-db` : nom court, résolu dans le namespace de l'instance ;
   le même CR fonctionne dans les deux environnements.
 - `http.tlsSecret: rhbk-internal-tls` : le certificat interne de la section 8.2.
@@ -636,6 +639,10 @@ spec:
     admin: ADMIN_HOSTNAME_PLACEHOLDER     # replaced by the overlay
     # Backchannel URLs are not resolved from request headers: all applications use the public URL.
     strict: true
+  # Client IP: Keycloak reads the X-Forwarded-* headers set by the OpenShift router (reencrypt
+  # routes). Safe because every route has set-forwarded-headers: replace (routes.yaml); guide 15.11.
+  proxy:
+    headers: xforwarded
   # The database is not managed by GitOps (postgres-db created manually in each namespace).
   db:
     vendor: postgres
@@ -678,6 +685,11 @@ spec:
 Trois routes en reencrypt. Les deux routes publiques partagent le même hostname,
 avec un `path` différent. La route admin n'a pas de `path` : elle prend tout.
 
+L'annotation `haproxy.router.openshift.io/set-forwarded-headers: replace` fait **remplacer** par le
+routeur l'en-tête `X-Forwarded-For` envoyé par le client (par défaut, il le complète). Keycloak
+lisant cet en-tête (`proxy.headers`, section 8.4), un client ne peut ainsi pas falsifier son
+adresse IP (section 15.11).
+
 `base/keycloak/routes.yaml`
 ```yaml
 # Public hostname: only /realms and /resources are exposed (Keycloak recommendation).
@@ -688,6 +700,9 @@ metadata:
   name: rhbk-public-realms
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+    # The router replaces X-Forwarded-For (default: appends to the client value, which a client
+    # could forge). Required by proxy.headers in the Keycloak CR; guide 15.11.
+    haproxy.router.openshift.io/set-forwarded-headers: replace
 spec:
   host: HOST_PLACEHOLDER   # replaced by the overlay
   path: /realms
@@ -708,6 +723,9 @@ metadata:
   name: rhbk-public-resources
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+    # The router replaces X-Forwarded-For (default: appends to the client value, which a client
+    # could forge). Required by proxy.headers in the Keycloak CR; guide 15.11.
+    haproxy.router.openshift.io/set-forwarded-headers: replace
 spec:
   host: HOST_PLACEHOLDER   # replaced by the overlay
   path: /resources
@@ -729,6 +747,9 @@ metadata:
   name: rhbk-admin
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+    # The router replaces X-Forwarded-For (default: appends to the client value, which a client
+    # could forge). Required by proxy.headers in the Keycloak CR; guide 15.11.
+    haproxy.router.openshift.io/set-forwarded-headers: replace
     # haproxy.router.openshift.io/ip_whitelist: "203.0.113.0/24 198.51.100.10"
 spec:
   host: ADMIN_HOST_PLACEHOLDER   # replaced by the overlay
@@ -956,12 +977,6 @@ namespace: rhbk-dev
     limits:
       cpu: "1"
       memory: "1500M"
-# Client IP: read the X-Forwarded-* headers set by the OpenShift router (reencrypt routes).
-# Safe only with the router replacing these headers (patch-routes.yaml), see guide 15.11.
-- op: add
-  path: /spec/proxy
-  value:
-    headers: xforwarded
 ```
 
 `overlays/dev/patch-routes.yaml`
@@ -970,11 +985,6 @@ namespace: rhbk-dev
 - op: replace
   path: /spec/host
   value: dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
-# The router replaces X-Forwarded-For (default: appends to the client value, which a client could
-# forge). Required with proxy headers enabled in the Keycloak CR (patch-keycloak.yaml).
-- op: add
-  path: /metadata/annotations/haproxy.router.openshift.io~1set-forwarded-headers
-  value: replace
 ```
 
 `overlays/dev/patch-route-admin.yaml`
@@ -2234,12 +2244,14 @@ logs). Les URL restent correctes dans les deux cas : `hostname` est une URL comp
 `strict: true`. En **passthrough**, le routeur ne voit que du chiffré : il ne peut ajouter aucun
 en-tête, et l'IP du client est perdue.
 
-Deux réglages, **appliqués en dev** (prod : à reporter dans `overlays/prod`, ou à passer dans la base) :
+Deux réglages, dans la **base** (prod et dev) :
 
 | Réglage | Où | Pourquoi |
 |---|---|---|
-| `spec.proxy.headers: xforwarded` | CR Keycloak (`overlays/dev/patch-keycloak.yaml`) | Keycloak prend l'IP du client dans `X-Forwarded-For` (option d'exécution : rolling update) |
-| annotation `haproxy.router.openshift.io/set-forwarded-headers: replace` | chaque Route (`overlays/dev/patch-routes.yaml`) | le routeur **remplace** `X-Forwarded-For` au lieu de compléter la valeur envoyée par le client, qu'un client pourrait falsifier |
+| `spec.proxy.headers: xforwarded` | CR Keycloak (`base/keycloak/keycloak.yaml`, section 8.4) | Keycloak prend l'IP du client dans `X-Forwarded-For` (option d'exécution : rolling update, sans coupure en prod) |
+| annotation `haproxy.router.openshift.io/set-forwarded-headers: replace` | chaque Route (`base/keycloak/routes.yaml`, section 8.5) | le routeur **remplace** `X-Forwarded-For` au lieu de compléter la valeur envoyée par le client, qu'un client pourrait falsifier |
+
+Ils ont d'abord été testés en dev (overlay), puis passés dans la base.
 
 Le second réglage est indispensable avec le premier : par défaut, le routeur ajoute l'IP réelle à la
 suite d'un éventuel `X-Forwarded-For` envoyé par le client, et Keycloak lit la première valeur. Un

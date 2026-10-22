@@ -37,6 +37,10 @@ spec:
     admin: ADMIN_HOSTNAME_PLACEHOLDER     # replaced by the overlay
     # Backchannel URLs are not resolved from request headers: all applications use the public URL.
     strict: true
+  # Client IP: Keycloak reads the X-Forwarded-* headers set by the OpenShift router (reencrypt
+  # routes). Safe because every route has set-forwarded-headers: replace (routes.yaml); guide 15.11.
+  proxy:
+    headers: xforwarded
   # The database is not managed by GitOps (postgres-db created manually in each namespace).
   db:
     vendor: postgres

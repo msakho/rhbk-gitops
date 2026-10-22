@@ -2,8 +2,3 @@
 - op: replace
   path: /spec/host
   value: dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
-# The router replaces X-Forwarded-For (default: appends to the client value, which a client could
-# forge). Required with proxy headers enabled in the Keycloak CR (patch-keycloak.yaml).
-- op: add
-  path: /metadata/annotations/haproxy.router.openshift.io~1set-forwarded-headers
-  value: replace

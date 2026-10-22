@@ -6,6 +6,9 @@ metadata:
   name: rhbk-public-realms
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+    # The router replaces X-Forwarded-For (default: appends to the client value, which a client
+    # could forge). Required by proxy.headers in the Keycloak CR; guide 15.11.
+    haproxy.router.openshift.io/set-forwarded-headers: replace
 spec:
   host: HOST_PLACEHOLDER   # replaced by the overlay
   path: /realms
@@ -26,6 +29,9 @@ metadata:
   name: rhbk-public-resources
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+    # The router replaces X-Forwarded-For (default: appends to the client value, which a client
+    # could forge). Required by proxy.headers in the Keycloak CR; guide 15.11.
+    haproxy.router.openshift.io/set-forwarded-headers: replace
 spec:
   host: HOST_PLACEHOLDER   # replaced by the overlay
   path: /resources
@@ -47,6 +53,9 @@ metadata:
   name: rhbk-admin
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+    # The router replaces X-Forwarded-For (default: appends to the client value, which a client
+    # could forge). Required by proxy.headers in the Keycloak CR; guide 15.11.
+    haproxy.router.openshift.io/set-forwarded-headers: replace
     # haproxy.router.openshift.io/ip_whitelist: "203.0.113.0/24 198.51.100.10"
 spec:
   host: ADMIN_HOST_PLACEHOLDER   # replaced by the overlay

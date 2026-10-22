@@ -19,9 +19,3 @@
     limits:
       cpu: "1"
       memory: "1500M"
-# Client IP: read the X-Forwarded-* headers set by the OpenShift router (reencrypt routes).
-# Safe only with the router replacing these headers (patch-routes.yaml), see guide 15.11.
-- op: add
-  path: /spec/proxy
-  value:
-    headers: xforwarded
