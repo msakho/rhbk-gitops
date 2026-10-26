@@ -3732,6 +3732,34 @@ l'identifiant d'une trace, puis dans **Observe → Logs** :
 Seules les requêtes pendant lesquelles Keycloak écrit un log (avertissement, erreur, connexion
 refusée…) ont des lignes correspondantes.
 
+**5. Suivre un utilisateur.** Les spans ne contiennent ni le nom ni l'identifiant de
+l'utilisateur. Deux attributs permettent quand même de suivre son parcours :
+
+- `client.address` : l'IP réelle du client (Keycloak la lit dans les en-têtes `X-Forwarded-*`
+  posés par le routeur, guide section 15.11) ;
+- `kc.sessionId` (connexion, console) et `kc.token.sid` (délivrance des jetons) : l'identifiant
+  de la session de l'utilisateur.
+
+| Requête | Ce qu'elle montre |
+|---|---|
+| `{resource.service.name="rhbk-dev" && span.client.address="<IP>"}` | toutes les requêtes venant d'une IP (fichiers statiques, `.well-known`, connexion, console) |
+| `{resource.service.name="rhbk-dev" && (span.kc.sessionId="<sessionId>" \|\| span.kc.token.sid="<sessionId>")}` | le parcours d'une session : connexion (`POST …/login-actions/authenticate`), jetons (`POST …/token`), puis les appels de la console ou de l'application |
+| `{resource.service.name="rhbk-dev" && span.http.route="/realms/{realm}/login-actions/authenticate"}` | toutes les connexions (formulaire de login) |
+
+Filtres à combiner : `span.user_agent.original=~".*Chrome.*"` (navigateur),
+`span.kc.clientId="<client>"` (application), `span.kc.realmName="<realm>"` (realm).
+
+Retrouver l'identifiant de session d'un utilisateur donné :
+
+- console Keycloak, **Users → l'utilisateur → onglet Sessions**, colonne ID ;
+- ou l'événement `LOGIN` (**Realm settings → Events**, ou les logs dans Loki si les événements y
+  sont écrits) : il contient `userId`, `sessionId` et `ipAddress`.
+
+Démarche : utilisateur → identifiant de session → traces. Le suivi par IP est moins précis :
+plusieurs utilisateurs derrière un NAT ou un proxy d'entreprise partagent la même IP. En prod,
+seules 10 % des requêtes sont tracées : une partie du parcours peut manquer. Les traces sont
+conservées 72 h.
+
 **Valider sans la console** (même source que la console ; jeton de l'utilisateur, non affiché) :
 
 ```bash
