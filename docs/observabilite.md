@@ -3749,13 +3749,22 @@ l'utilisateur. Deux attributs permettent quand même de suivre son parcours :
 Filtres à combiner : `span.user_agent.original=~".*Chrome.*"` (navigateur),
 `span.kc.clientId="<client>"` (application), `span.kc.realmName="<realm>"` (realm).
 
-Retrouver l'identifiant de session d'un utilisateur donné :
+Retrouver l'identifiant de session et l'IP d'un utilisateur dans la console d'administration
+Keycloak. L'IP affichée est la même que `client.address` : Keycloak et les traces la lisent dans
+l'en-tête `X-Forwarded-For` posé par le routeur.
 
-- console Keycloak, **Users → l'utilisateur → onglet Sessions**, colonne ID ;
-- ou l'événement `LOGIN` (**Realm settings → Events**, ou les logs dans Loki si les événements y
-  sont écrits) : il contient `userId`, `sessionId` et `ipAddress`.
+| Où | Ce qu'on y trouve |
+|---|---|
+| **Users → l'utilisateur → onglet Sessions** | sessions actives de l'utilisateur : **ID** de session (valeur de `kc.sessionId` / `kc.token.sid`), **IP address**, début, dernier accès, clients |
+| **Sessions** (menu de gauche) | toutes les sessions actives du realm, avec utilisateur et IP |
+| **Events → User events** | historique : `LOGIN`, `LOGIN_ERROR`… avec IP, utilisateur et session. Seule source pour une session fermée ou une connexion refusée. Nécessite **Realm settings → Events → User events settings → Save events** activé |
 
-Démarche : utilisateur → identifiant de session → traces. Le suivi par IP est moins précis :
+Sans la console : dans une trace, le span HTTP racine (par exemple `POST …/login-actions/authenticate`)
+porte `client.address` et `user_agent.original` ; cette IP sert ensuite de filtre pour retrouver
+les autres traces du même poste.
+
+Démarche : utilisateur → identifiant de session (console) → traces ; si la session est fermée,
+passer par les événements ou par l'IP. Le suivi par IP est moins précis :
 plusieurs utilisateurs derrière un NAT ou un proxy d'entreprise partagent la même IP. En prod,
 seules 10 % des requêtes sont tracées : une partie du parcours peut manquer. Les traces sont
 conservées 72 h.
