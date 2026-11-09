@@ -2521,7 +2521,9 @@ oc exec -n vault vault-0 -c vault -- vault status | grep Sealed
 ```
 
 Attendu : une ligne `unsealed` dans les logs, `Sealed false`. Testé sur le sandbox : pod
-`2/2` et Vault descellé moins de 30 secondes après la suppression du pod.
+`2/2` et Vault descellé moins de 30 secondes après la suppression du pod ; après un vrai
+redémarrage du cluster, descellé 13 secondes après le démarrage du conteneur, ExternalSecrets et
+Applications revenues saines sans intervention.
 
 **Limite de sécurité** : la clé est stockée dans le même cluster que les données qu'elle
 protège. Quiconque peut lire ce Secret (ou une sauvegarde etcd) peut desceller Vault.
