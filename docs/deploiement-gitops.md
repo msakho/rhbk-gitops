@@ -1957,8 +1957,14 @@ Les valeurs sont dans Vault ; le dépôt ne change pas.
 
 ### 15.5 Après un redémarrage du cluster
 
-Tout redémarre seul (PostgreSQL, Keycloak, ArgoCD, ESO, Vault et leurs données),
-**sauf une étape : Vault redémarre scellé** et doit être descellé à la main.
+Tout redémarre seul (PostgreSQL, Keycloak, ArgoCD, ESO, Vault et leurs données).
+**Vault redémarre scellé** : sur le sandbox, le conteneur `auto-unseal` du pod `vault-0` le
+descelle en quelques secondes (annexe A.4). La commande manuelle ci-dessous ne sert que si ce
+conteneur échoue (Secret `vault-unseal-key` absent, par exemple) :
+
+```bash
+oc logs vault-0 -n vault -c auto-unseal
+```
 
 **Ce qui se passe tant que Vault est scellé** (comportement vérifié en supprimant le
 pod `vault-0`) :
@@ -2038,7 +2044,8 @@ partie 2 de `observabilite.md` (`user-event-metrics`, histogrammes HTTP).
 | Vault | `VaultSealedOrDown` : Vault scellé ou arrêté depuis 5 min (pod non prêt) | `rhbk-platform`, `monitoring/` |
 | ArgoCD | `ArgoCDApplicationUnhealthy` (Degraded / Missing / Unknown depuis 15 min) ; `ArgoCDSyncAlert` (OutOfSync, fournie par l'opérateur GitOps) | `rhbk-platform`, `monitoring/` |
 
-Après un redémarrage du cluster, `VaultSealedOrDown` signale qu'il faut desceller, et
+Après un redémarrage du cluster, `VaultSealedOrDown` signale que Vault n'a pas été descellé
+(descellement automatique en échec : desceller à la main), et
 `ExternalSecretNotSynced` qu'il faut forcer la relecture (section 15.5).
 
 **Historique** : les métriques sont conservées **7 jours** sur des volumes persistants
@@ -2397,7 +2404,7 @@ bonne IP : l'instrumentation OpenTelemetry lit elle-même `X-Forwarded-For`.
 | Les ExternalSecrets restent `OutOfSync` dans ArgoCD alors qu'ils sont `SecretSynced` | Les valeurs par défaut ajoutées par le webhook d'ESO ne sont pas dans git | Les déclarer explicitement (section 10) ; comparer avec `oc get externalsecret <nom> -n <ns> -o yaml`. |
 | ExternalSecret en `SecretSyncedError`, message `ClusterSecretStore "vault-store" is not ready` | Le store n'est pas valide | `oc get clustersecretstore vault-store -o yaml` : voir les lignes suivantes. |
 | Store invalide : `unable to log in with Kubernetes auth: context deadline exceeded` | Les pods ESO sont isolés par des NetworkPolicies deny-all : la sortie vers Vault n'est pas ouverte | Dans `rhbk-platform`, ajouter la règle d'egress dans `eso/externalsecretsconfig.yaml` (`spec.controllerConfig.networkPolicies`, annexe A.2), puis synchroniser `eso-config`. Jamais de NetworkPolicy à la main. |
-| Store invalide : `Vault is sealed` / code 503 | Vault redémarré et scellé | Desceller (section 15.5). |
+| Store invalide : `Vault is sealed` / code 503 | Vault redémarré et scellé, descellement automatique en échec | `oc logs vault-0 -n vault -c auto-unseal` ; desceller à la main (section 15.5). |
 | Store invalide : `permission denied` / 403 | Rôle ou politique Vault incorrects | Vérifier le rôle `external-secrets` et la politique `rhbk-read` (annexe A.5). |
 | ExternalSecret `SecretSyncedError` : `cannot find secret data for key` | Chemin ou propriété absents dans Vault | `vault kv get -mount=secret rhbk/<env>/<chemin>` ; vérifier les noms des propriétés. |
 
@@ -2476,13 +2483,50 @@ grep -qx 'vault-init.json' .gitignore || printf '\n# Clé de descellement et tok
 git check-ignore -v vault-init.json
 ```
 
-Desceller (à refaire après chaque redémarrage du pod ou du cluster) :
+Desceller la première fois :
 
 ```bash
-oc exec -n vault vault-0 -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
+oc exec -n vault vault-0 -c vault -- vault operator unseal "$(python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0])')"
 ```
 
 Vérifier : `Initialized true`, `Sealed false`.
+
+**Descellement automatique (sandbox uniquement).** Le pod `vault-0` contient un conteneur
+annexe `auto-unseal` (`server.extraContainers` dans `vault/values.yaml` de `rhbk-platform`) :
+toutes les 10 secondes, il lance `vault status` (code de sortie 2 = scellé) et descelle Vault avec
+la clé du Secret `vault-unseal-key`. Il redémarre avec le pod : plus de commande manuelle après un
+redémarrage du pod ou du cluster. Tant que le Secret n'existe pas, ce conteneur ne démarre pas
+(pod `1/2`, `CreateContainerConfigError`), ce qui n'empêche ni l'initialisation ni le
+descellement manuel. Créer le Secret une fois, après l'initialisation (clé jamais affichée,
+jamais dans git ; ESO ne peut pas le fournir puisqu'il dépend de Vault) :
+
+```bash
+python3 -c 'import json;print(json.load(open("vault-init.json"))["unseal_keys_b64"][0],end="")' | oc create secret generic vault-unseal-key -n vault --from-file=key=/dev/stdin
+```
+
+Le conteneur démarre seul dans la minute (pod `2/2`). Vérifier, puis tester en supprimant le
+pod (le StatefulSet est en `updateStrategy: OnDelete` : c'est aussi la façon d'appliquer une
+modification de `vault/values.yaml` après synchronisation) :
+
+```bash
+oc delete pod vault-0 -n vault
+```
+
+```bash
+oc logs vault-0 -n vault -c auto-unseal
+```
+
+```bash
+oc exec -n vault vault-0 -c vault -- vault status | grep Sealed
+```
+
+Attendu : une ligne `unsealed` dans les logs, `Sealed false`. Testé sur le sandbox : pod
+`2/2` et Vault descellé moins de 30 secondes après la suppression du pod.
+
+**Limite de sécurité** : la clé est stockée dans le même cluster que les données qu'elle
+protège. Quiconque peut lire ce Secret (ou une sauvegarde etcd) peut desceller Vault.
+Acceptable pour un sandbox ; en production, utiliser le descellement automatique natif de Vault
+(bloc `seal "awskms"`, `"transit"`…), avec la clé hors du cluster.
 
 ### A.5 Configurer Vault pour ESO
 
