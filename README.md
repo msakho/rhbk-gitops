@@ -41,8 +41,8 @@ tools/postgresql/              Hors ArgoCD : base PostgreSQL d'un environnement 
 
 ## Exposition et isolation de la console admin
 
-Les routes sont en **reencrypt** : le routeur présente le certificat Let's Encrypt (`rhbk-tls-secret`, via
-`spec.tls.externalCertificate`) et rechiffre vers Keycloak, qui sert un certificat généré par le service-ca
+Les routes sont en **reencrypt** : le routeur présente le certificat Let's Encrypt (`rhbk-route-tls`, émis et renouvelé
+par cert-manager, lu via `spec.tls.externalCertificate`) et rechiffre vers Keycloak, qui sert un certificat généré par le service-ca
 (`rhbk-internal-tls`). Le routeur lit le chemin HTTP :
 
 - hostname public : seuls `/realms` et `/resources` sont routés, tout le reste (`/admin`, `/`, …) renvoie 503 ;
@@ -60,16 +60,19 @@ Les namespaces, l'opérateur RHBK (un par namespace, canal `stable-v26.6`), Exte
 
 Restent à faire à la main, par environnement :
 
-1. **Certificat** couvrant les hostnames de l'environnement (guide, annexe C).
-2. **Valeurs dans Vault** sous `secret/rhbk/<env>/` : `db`, `bootstrap-admin`, `tls` (guide, annexe A.7).
-3. **Base PostgreSQL** `postgres-db` : manifestes `tools/postgresql/`, identifiants lus dans Vault (guide, annexe B).
+1. **Valeurs dans Vault** sous `secret/rhbk/<env>/` : `db`, `bootstrap-admin` (guide, annexe A.7).
+2. **Base PostgreSQL** `postgres-db` : manifestes `tools/postgresql/`, identifiants lus dans Vault (guide, annexe B).
 
 ## Secrets
 
 Aucun secret n'est dans git. Les `ExternalSecret` de `overlays/<env>/external-secrets/` font créer par ESO,
-depuis Vault, les Secrets `rhbk-db-secret`, `initial-admin-secret` et `rhbk-tls-secret`.
+depuis Vault, les Secrets `rhbk-db-secret` et `initial-admin-secret`.
 
-Après un redémarrage du cluster, Vault est scellé : le desceller, depuis le dossier local du dépôt
+Le certificat public des routes n'est pas dans Vault : `overlays/<env>/certificate.yaml` le fait émettre et
+renouveler par cert-manager (`ClusterIssuer` Let's Encrypt du cluster ; guide, étape 4 et section 15.12).
+
+Après un redémarrage du cluster, Vault est scellé, puis descellé automatiquement par le conteneur `auto-unseal`
+(sandbox, `rhbk-platform`). En secours, le desceller à la main depuis le dossier local du dépôt
 `rhbk-platform` (la clé est dans `vault-init.json`, ignoré par git) :
 
 ```bash

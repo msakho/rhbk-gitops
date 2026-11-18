@@ -46,7 +46,7 @@ obtient exactement le dépôt `https://github.com/msakho/rhbk-gitops`.
 16. [Dépannage](#16-dépannage)
 17. [Annexe A : plateforme (dépôt rhbk-platform) et Vault](#17-annexe-a--plateforme-dépôt-rhbk-platform-et-vault)
 18. [Annexe B : créer la base PostgreSQL d'un environnement](#18-annexe-b--créer-la-base-postgresql-dun-environnement)
-19. [Annexe C : générer le certificat d'un environnement](#19-annexe-c--générer-le-certificat-dun-environnement)
+19. [Annexe C : certificat manuel avec acme.sh (sans cert-manager)](#19-annexe-c--certificat-manuel-avec-acmesh-sans-cert-manager)
 20. [Annexe D : observabilité (vue d'ensemble)](#20-annexe-d--observabilité-vue-densemble)
 
 ### Les étapes en un coup d'œil
@@ -55,8 +55,8 @@ obtient exactement le dépôt `https://github.com/msakho/rhbk-gitops`.
 |---|---|---|
 | 2. Prérequis | cluster, poste de travail | plateforme prête, outils installés, valeurs choisies |
 | 3. Dépôt | GitHub, poste | dépôt local avec son arborescence et son `.gitignore` |
-| 4. Certificat | poste (acme.sh, annexe C) | un certificat par environnement dans `cert/` |
-| 5. Vault | pod Vault (annexe A.7) | `secret/rhbk/<env>/db`, `bootstrap-admin`, `tls` |
+| 4. Certificat | cluster (cert-manager) | émetteur Let's Encrypt (`ClusterIssuer`) disponible ; le certificat sera demandé par l'overlay |
+| 5. Vault | pod Vault (annexe A.7) | `secret/rhbk/<env>/db`, `bootstrap-admin` |
 | 6. PostgreSQL | namespace de l'environnement (annexe B) | Service `postgres-db` prêt |
 | 7. Image | poste (podman) | image optimisée sur quay.io, **digest** noté |
 | 8 à 11. Fichiers du dépôt | poste | base, overlays, ExternalSecrets, ArgoCD : dépôt complet en local |
@@ -98,8 +98,9 @@ Kustomize assemble base + overlay au moment où ArgoCD lit le dépôt.
 | Ressource | Rôle |
 |---|---|
 | `Service rhbk-internal` | Service interne vers les pods Keycloak. Son annotation fait générer par OpenShift (service-ca) le certificat `rhbk-internal-tls`. |
-| `Role` / `RoleBinding router-read-rhbk-tls` | Autorise le routeur OpenShift à lire le certificat public `rhbk-tls-secret`. |
-| `ExternalSecret` ×3 | Font créer par ESO, depuis Vault, les Secrets `rhbk-db-secret`, `initial-admin-secret` et `rhbk-tls-secret`. |
+| `Certificate rhbk-route-tls` | Fait émettre et renouveler par cert-manager le certificat public Let's Encrypt (Secret `rhbk-route-tls`). |
+| `Role` / `RoleBinding router-read-rhbk-tls` | Autorise le routeur OpenShift à lire le certificat public `rhbk-route-tls`. |
+| `ExternalSecret` ×2 | Font créer par ESO, depuis Vault, les Secrets `rhbk-db-secret` et `initial-admin-secret`. |
 | `Keycloak rhbk-<env>` | L'instance Keycloak (CR de l'opérateur). |
 | `Route rhbk-public-realms` | Hostname public, chemin `/realms` uniquement. |
 | `Route rhbk-public-resources` | Hostname public, chemin `/resources` uniquement. |
@@ -152,7 +153,7 @@ publiquement que `/realms` et `/resources`.
    le routeur fait confiance automatiquement. Le Service de l'opérateur ne convient pas : il
    retirerait l'annotation.
 4. **Le certificat public lu par le routeur** (`spec.tls.externalCertificate`) plutôt que copié
-   dans chaque route : le routeur lit le Secret `rhbk-tls-secret` (créé par ESO depuis Vault), ce qui
+   dans chaque route : le routeur lit le Secret `rhbk-route-tls` (émis par cert-manager), ce qui
    demande un droit de lecture (Role et RoleBinding, section 8.3). Un renouvellement du certificat
    est pris sans toucher aux routes.
 5. **Trois routes** (section 8.5) :
@@ -179,7 +180,7 @@ Deux certificats sont donc en jeu :
 
 | Certificat | Présenté par | Source |
 |---|---|---|
-| Public (Let's Encrypt) | le routeur, au navigateur | secret `rhbk-tls-secret`, lu via `spec.tls.externalCertificate` |
+| Public (Let's Encrypt) | le routeur, au navigateur | secret `rhbk-route-tls`, émis et renouvelé par cert-manager, lu via `spec.tls.externalCertificate` |
 | Interne | Keycloak, au routeur | secret `rhbk-internal-tls`, généré automatiquement par le service-ca |
 
 #### Résultat mesuré (prod)
@@ -268,7 +269,7 @@ Ces éléments **ne sont pas gérés par ce dépôt** : ils sont déployés par 
 | `podman` | étape 7 | `podman --version` |
 | Compte Red Hat (lecture de `registry.redhat.io`) | étape 7 | `podman login registry.redhat.io` |
 | Compte quay.io et dépôt d'images (ici `quay.io/msakho0/mskeycloak`, **public**) | étape 7 | `podman login quay.io` |
-| `openssl`, `python3`, acme.sh et une clé AWS Route 53 | étapes 4 et 5 | annexe C.1 |
+| `openssl`, `python3` | étapes 5 et 13 | `openssl version`, `python3 --version` |
 
 Si le dépôt quay.io est **privé**, le cluster doit recevoir un pull secret pour cette image
 (`spec.imagePullSecrets` du CR) : ce guide suppose un dépôt public.
@@ -351,11 +352,11 @@ overlays/
     patch-keycloak.yaml
     patch-routes.yaml
     patch-route-admin.yaml
+    certificate.yaml
     external-secrets/
       kustomization.yaml
       rhbk-db-secret.yaml
       initial-admin-secret.yaml
-      rhbk-tls-secret.yaml
   dev/
     (mêmes fichiers que prod)
 custom-rhbk/
@@ -393,40 +394,59 @@ vault-init.json
 ## 4. Étape : certificat de chaque environnement
 
 **Objectif** : un certificat Let's Encrypt par environnement, couvrant ses deux hostnames
-(public et admin). Le routeur le présentera aux navigateurs.
+(public et admin), présenté aux navigateurs par le routeur. Il est **demandé et renouvelé par
+cert-manager** : un objet `Certificate` dans l'overlay (section 9.5), aucun fichier de certificat
+sur le poste ni dans Vault.
 
-**Actions** : suivre l'**annexe C** (C.1 à C.5) avec `ENV=dev`, puis avec `ENV=prod`. Les
-fichiers sont écrits dans `cert/`, dossier ignoré par git (`.gitignore`, étape 3.3). Dans les
-commandes de l'annexe, remplace `/usr/local/dev/rhbk-gitops` par le dossier de ton dépôt.
-
-**Vérifier** : les deux hostnames de l'environnement et la date d'expiration :
-
-```bash
-openssl x509 -in cert/dev-rhbk.fullchain.pem -noout -text | grep -E 'DNS:|Not After'
+```
+Certificate rhbk-route-tls (git) ──▶ cert-manager ──(ClusterIssuer, challenge DNS Route 53)──▶ Let's Encrypt
+                                          │
+                                          └──▶ Secret rhbk-route-tls ──▶ lu par le routeur (3 routes)
 ```
 
-**Résultat** : `cert/<env>-rhbk.fullchain.pem` et `cert/<env>-rhbk.key.pem` pour dev et prod.
+- Durée de vie Let's Encrypt : **90 jours**. cert-manager renouvelle **environ 30 jours avant
+  l'expiration** et met à jour le Secret sur place ; le routeur prend le nouveau certificat sans
+  redémarrage ni changement des routes.
+- Prérequis : l'opérateur cert-manager et un `ClusterIssuer` Let's Encrypt capable de valider les
+  noms du domaine `apps`. Sur le sandbox, ils sont fournis : `letsencrypt-production-ec2`
+  (challenge DNS sur la zone Route 53 du cluster), aussi utilisé pour la console. Sur un autre
+  cluster, utiliser son propre `ClusterIssuer` et changer `issuerRef` dans `certificate.yaml`.
+
+**Vérifier** que l'émetteur est prêt et couvre le domaine `apps` :
+
+```bash
+oc get clusterissuer
+```
+
+```bash
+oc get clusterissuer letsencrypt-production-ec2 -o jsonpath='{.spec.acme.solvers[*].selector.dnsZones}{"\n"}'
+```
+
+Attendu : `READY True` et le domaine `apps.<cluster>` dans la liste.
+
+Sans cert-manager, l'annexe C donne la méthode manuelle (acme.sh), à refaire tous les 90 jours.
+
+**Résultat** : émetteur disponible ; le certificat sera émis à la première synchronisation
+(étape 13).
 
 ---
 
 ## 5. Étape : valeurs dans Vault
 
-**Objectif** : ranger dans Vault, pour chaque environnement, les trois valeurs que Keycloak
+**Objectif** : ranger dans Vault, pour chaque environnement, les deux valeurs que Keycloak
 lira par ESO (étape 10). Aucune n'est écrite dans git.
 
 | Chemin Vault | Clés | Contenu |
 |---|---|---|
 | `secret/rhbk/<env>/db` | `username`, `password` | identifiants de la base ; pour une base neuve, à choisir librement : l'étape 6 crée la base **avec** ces valeurs |
 | `secret/rhbk/<env>/bootstrap-admin` | `username`, `password` | admin temporaire du premier démarrage de Keycloak |
-| `secret/rhbk/<env>/tls` | `tls.crt` (fullchain), `tls.key` | certificat de l'étape 4 |
 
 **Actions** : suivre l'**annexe A.7** avec `ENV=dev`, puis avec `ENV=prod`. Les valeurs
-sont saisies sans affichage. Les variables `CERT` et `KEY` pointent vers les fichiers de
-l'étape 4, dans le `cert/` de ton dépôt.
+sont saisies sans affichage.
 
-**Vérifier** : la commande de fin de l'annexe A.7 liste `bootstrap-admin`, `db` et `tls`.
+**Vérifier** : la commande de fin de l'annexe A.7 liste `bootstrap-admin` et `db`.
 
-**Résultat** : trois entrées par environnement dans Vault.
+**Résultat** : deux entrées par environnement dans Vault.
 
 ---
 
@@ -623,13 +643,14 @@ spec:
 ### 8.3 `base/keycloak/router-secret-reader-rbac.yaml`
 
 Le routeur (ServiceAccount `router` du namespace `openshift-ingress`) doit pouvoir
-lire `rhbk-tls-secret` pour utiliser `externalCertificate`. Sans ce droit, l'API
+lire `rhbk-route-tls` pour utiliser `externalCertificate`. Sans ce droit, l'API
 refuse la création des routes (`Forbidden: router serviceaccount does not have
 permission to get this secret`).
 
 `base/keycloak/router-secret-reader-rbac.yaml`
 ```yaml
-# Allows the router to read the Let's Encrypt certificate (spec.tls.externalCertificate).
+# Allows the router to read the Let's Encrypt certificate issued by cert-manager (certificate.yaml
+# in each overlay) and referenced by spec.tls.externalCertificate.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -639,7 +660,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["rhbk-tls-secret"]
+    resourceNames: ["rhbk-route-tls"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -740,7 +761,7 @@ spec:
   http:
     httpsPort: 8443
     # Internal certificate generated by the service-ca (internal-svc.yaml). The public
-    # Let's Encrypt certificate (rhbk-tls-secret) is presented by the router.
+    # Let's Encrypt certificate (rhbk-route-tls, issued by cert-manager) is presented by the router.
     tlsSecret: rhbk-internal-tls
   # The operator Ingress is disabled: exposure is handled by routes.yaml.
   ingress:
@@ -795,7 +816,7 @@ spec:
     termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
     externalCertificate:
-      name: rhbk-tls-secret
+      name: rhbk-route-tls
 ---
 apiVersion: route.openshift.io/v1
 kind: Route
@@ -818,7 +839,7 @@ spec:
     termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
     externalCertificate:
-      name: rhbk-tls-secret
+      name: rhbk-route-tls
 ---
 # Admin hostname: every path (the console needs /admin, /realms/master and /resources).
 apiVersion: route.openshift.io/v1
@@ -842,7 +863,7 @@ spec:
     termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
     externalCertificate:
-      name: rhbk-tls-secret
+      name: rhbk-route-tls
 ```
 
 Pour restreindre l'accès à la console à certaines adresses IP, décommente
@@ -898,13 +919,13 @@ spec:
 ## 9. Étape : les overlays prod et dev
 
 **Objectif** : ce qui change par environnement (namespace, nom d'instance, hostnames,
-nombre de pods, ressources). Chaque overlay contient 4 fichiers ; prod et dev ne diffèrent
-que par les valeurs.
+nombre de pods, ressources, certificat). Chaque overlay contient 5 fichiers ; prod et dev ne
+diffèrent que par les valeurs.
 
 ### 9.1 `overlays/prod/kustomization.yaml`
 
-- `resources` : la base Keycloak et les ExternalSecrets de l'environnement
-  (étape 10).
+- `resources` : la base Keycloak, les ExternalSecrets de l'environnement (étape 10) et
+  le certificat (section 9.5).
 - `namespace` : appliqué à toutes les ressources (sauf le `subjects[].namespace`
   `openshift-ingress` du RoleBinding, que Kustomize ne touche pas).
 - `labels` : ajoutés sur toutes les ressources, sans toucher aux sélecteurs.
@@ -929,6 +950,8 @@ resources:
   - ../../base/keycloak
   # ExternalSecrets from Vault (ClusterSecretStore vault-store, defined in the rhbk-platform repository).
   - external-secrets
+  # Public certificate of the routes (cert-manager).
+  - certificate.yaml
 
 patches:
   - path: patch-keycloak.yaml
@@ -1015,12 +1038,46 @@ spec:
   host: prod-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
 ```
 
-### 9.5 `overlays/dev/*`
+### 9.5 `overlays/prod/certificate.yaml`
 
-Copie les 4 fichiers de prod :
+Le certificat public de l'environnement (étape 4), pour ses deux hostnames.
+
+- `secretName` : le Secret créé par cert-manager, lu par les routes (`externalCertificate`,
+  section 8.5) avec le droit de la section 8.3.
+- `issuerRef` : le `ClusterIssuer` vérifié à l'étape 4.
+- Vague ArgoCD `0` : ArgoCD attend que le `Certificate` soit `Ready` (une à deux minutes à la
+  première émission) avant de créer les routes (vague `2`). Les routes ne pointent donc jamais
+  vers un Secret absent.
+
+`overlays/prod/certificate.yaml`
+```yaml
+# Public certificate of the routes (Let's Encrypt), issued and renewed by cert-manager: renewal
+# about 30 days before expiry, Secret rhbk-route-tls updated in place, the router picks it up
+# without restart. ClusterIssuer provided by the sandbox (DNS-01 challenge on Route 53); on
+# another cluster, use its own ClusterIssuer. Wave 0: ArgoCD waits until the Certificate is
+# Ready before creating the routes (wave 2).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rhbk-route-tls
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  secretName: rhbk-route-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-production-ec2
+  dnsNames:
+    - prod-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+    - prod-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+```
+
+### 9.6 `overlays/dev/*`
+
+Copie les 5 fichiers de prod :
 
 ```bash
-cp overlays/prod/kustomization.yaml overlays/prod/patch-*.yaml overlays/dev/
+cp overlays/prod/kustomization.yaml overlays/prod/patch-*.yaml overlays/prod/certificate.yaml overlays/dev/
 ```
 
 Puis adapte-les. Les fichiers dev complets :
@@ -1077,15 +1134,23 @@ spec:
   host: dev-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
 ```
 
-**Résultat** : `overlays/prod/` et `overlays/dev/` avec 4 fichiers chacun (les
+`overlays/dev/certificate.yaml` : identique à prod, sauf les deux hostnames :
+
+```yaml
+  dnsNames:
+    - dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+    - dev-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+```
+
+**Résultat** : `overlays/prod/` et `overlays/dev/` avec 5 fichiers chacun (les
 ExternalSecrets suivent à l'étape 10).
 
 ---
 
 ## 10. Étape : les ExternalSecrets (secrets depuis Vault)
 
-**Objectif** : faire créer par ESO, depuis Vault (étape 5), les trois Secrets dont Keycloak
-a besoin. Ils ne sont **jamais écrits dans git** : le dépôt contient seulement des
+**Objectif** : faire créer par ESO, depuis Vault (étape 5), les deux Secrets dont Keycloak
+a besoin (le certificat public vient de cert-manager, section 9.5). Ils ne sont **jamais écrits dans git** : le dépôt contient seulement des
 `ExternalSecret`, qui indiquent à ESO quel chemin lire dans Vault et quel Secret
 Kubernetes créer.
 
@@ -1099,7 +1164,6 @@ ExternalSecret (git) ──▶ ESO ──(ClusterSecretStore vault-store)──�
 |---|---|---|---|
 | `rhbk-db-secret` | `secret/rhbk/<env>/db` | `rhbk-db-secret` | `database-username`, `database-password` |
 | `initial-admin-secret` | `secret/rhbk/<env>/bootstrap-admin` | `initial-admin-secret` | `username`, `password` |
-| `rhbk-tls-secret` | `secret/rhbk/<env>/tls` | `rhbk-tls-secret` (type `kubernetes.io/tls`) | `tls.crt`, `tls.key` |
 
 Points importants :
 
@@ -1122,7 +1186,6 @@ kind: Kustomization
 resources:
   - rhbk-db-secret.yaml
   - initial-admin-secret.yaml
-  - rhbk-tls-secret.yaml
 ```
 
 `overlays/prod/external-secrets/rhbk-db-secret.yaml`
@@ -1193,51 +1256,13 @@ spec:
         nullBytePolicy: Ignore
 ```
 
-`overlays/prod/external-secrets/rhbk-tls-secret.yaml`
-```yaml
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: rhbk-tls-secret
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    kind: ClusterSecretStore
-    name: vault-store
-  target:
-    name: rhbk-tls-secret
-    creationPolicy: Owner
-    deletionPolicy: Retain
-    template:
-      engineVersion: v2
-      mergePolicy: Replace
-      type: kubernetes.io/tls
-  data:
-    - secretKey: tls.crt           # fullchain PEM
-      remoteRef:
-        key: rhbk/prod/tls
-        property: tls.crt
-        conversionStrategy: Default
-        decodingStrategy: None
-        metadataPolicy: None
-        nullBytePolicy: Ignore
-    - secretKey: tls.key
-      remoteRef:
-        key: rhbk/prod/tls
-        property: tls.key
-        conversionStrategy: Default
-        decodingStrategy: None
-        metadataPolicy: None
-        nullBytePolicy: Ignore
-```
-
 Copie pour dev, en remplaçant les chemins Vault :
 
 ```bash
-for f in kustomization rhbk-db-secret initial-admin-secret rhbk-tls-secret; do sed 's#rhbk/prod/#rhbk/dev/#' overlays/prod/external-secrets/$f.yaml > overlays/dev/external-secrets/$f.yaml; done
+for f in kustomization rhbk-db-secret initial-admin-secret; do sed 's#rhbk/prod/#rhbk/dev/#' overlays/prod/external-secrets/$f.yaml > overlays/dev/external-secrets/$f.yaml; done
 ```
 
-**Résultat** : 4 fichiers dans `overlays/<env>/external-secrets/` pour chaque environnement.
+**Résultat** : 3 fichiers dans `overlays/<env>/external-secrets/` pour chaque environnement.
 
 ---
 
@@ -1735,23 +1760,15 @@ Les prérequis de la section 2, dans le namespace `rhbk-qualif` :
 
 1. Namespace `rhbk-qualif` et opérateur RHBK : dans `rhbk-platform` (README,
    « Ajouter un environnement »), à synchroniser **avant** l'étape 15.3.6.
-2. **Certificat** pour les hostnames de qualif (annexe C).
-3. **Valeurs dans Vault** sous `secret/rhbk/qualif/` : `db`, `bootstrap-admin` et
-   `tls` (voir annexe A.7). Les ExternalSecrets de l'overlay les liront après la
-   commande `sed` de l'étape 15.3.2. Aucun Secret n'est à créer à la main.
-4. **Base PostgreSQL** `postgres-db` (annexe B), une fois le namespace créé par
+2. **Valeurs dans Vault** sous `secret/rhbk/qualif/` : `db` et `bootstrap-admin` (voir
+   annexe A.7). Les ExternalSecrets de l'overlay les liront après la commande `sed` de
+   l'étape 15.3.2. Aucun Secret n'est à créer à la main.
+3. **Base PostgreSQL** `postgres-db` (annexe B), une fois le namespace créé par
    `rhbk-platform` et les valeurs rangées dans Vault.
-5. **Vérifier le certificat** : le certificat existant ne couvre que les hostnames prod et
-   dev. Le `tls.crt` rangé dans `secret/rhbk/qualif/tls` doit avoir un SAN contenant
-   `qualif-rhbk.<domaine>` et `qualif-rhbk-admin.<domaine>`. Vérification sur le
-   fichier avant de le ranger :
 
-   ```bash
-   openssl x509 -in qualif.fullchain.pem -noout -text | grep DNS:
-   ```
-
-   Sans ce certificat, les routes répondent, mais le navigateur affiche une erreur
-   de certificat.
+Le certificat n'est pas à préparer : la commande `sed` de l'étape 15.3.2 met les hostnames de
+qualif dans `overlays/qualif/certificate.yaml`, et cert-manager l'émet à la première
+synchronisation.
 
 #### 15.3.2 Créer l'overlay
 
@@ -1762,7 +1779,7 @@ cp -r overlays/dev overlays/qualif
 ```
 
 Remplacer les valeurs de dev dans tous ses fichiers (namespace et nom d'instance,
-hostnames, label `environment`, chemins des ExternalSecrets) :
+hostnames des routes et du certificat, label `environment`, chemins des ExternalSecrets) :
 
 ```bash
 find overlays/qualif -name '*.yaml' -exec sed -i '' -e 's#rhbk-dev#rhbk-qualif#g' -e 's#dev-rhbk#qualif-rhbk#g' -e 's#environment: dev#environment: qualif#g' -e 's#rhbk/dev/#rhbk/qualif/#g' {} +
@@ -1952,8 +1969,7 @@ Les valeurs sont dans Vault ; le dépôt ne change pas.
    ```bash
    oc delete pod rhbk-dev-0 -n rhbk-dev
    ```
-   Pour le certificat (`tls`), pas de redémarrage : le routeur relit
-   `rhbk-tls-secret` automatiquement (`externalCertificate`).
+   Le certificat public n'est pas dans Vault : cert-manager le renouvelle seul (section 15.12).
 
 ### 15.5 Après un redémarrage du cluster
 
@@ -2002,7 +2018,7 @@ oc get clustersecretstore vault-store
 Pour ne pas attendre le rafraîchissement suivant des ExternalSecrets :
 
 ```bash
-for ns in rhbk rhbk-dev; do for es in rhbk-db-secret initial-admin-secret rhbk-tls-secret; do oc annotate externalsecret $es -n $ns force-sync=$(date +%s) --overwrite; done; done
+for ns in rhbk rhbk-dev; do for es in rhbk-db-secret initial-admin-secret; do oc annotate externalsecret $es -n $ns force-sync=$(date +%s) --overwrite; done; done
 ```
 
 ```bash
@@ -2054,8 +2070,9 @@ redémarrages du cluster.
 
 **Notifications** : section 15.7.
 
-**Non couvert** : l'expiration du certificat (il faudrait un sondeur *blackbox* ;
-cert-manager fournira cette métrique).
+**Non couvert** : une alerte sur l'expiration du certificat. cert-manager expose
+`certmanager_certificate_expiration_timestamp_seconds` ; une règle d'alerte reste à écrire
+(section 15.12).
 
 ### 15.7 Notifications
 
@@ -2386,12 +2403,59 @@ après, c'est l'**IP publique du client**, y compris avec le faux `X-Forwarded-F
 ignoré. Mêmes résultats sur le hostname admin. Les traces (`client.address`) montraient déjà la
 bonne IP : l'instrumentation OpenTelemetry lit elle-même `X-Forwarded-For`.
 
+### 15.12 Certificat public : renouvellement automatique (cert-manager)
+
+Le certificat Let's Encrypt des routes (`Certificate rhbk-route-tls`, section 9.5) est
+renouvelé par cert-manager **environ 30 jours avant son expiration** (90 jours de validité) : le
+Secret `rhbk-route-tls` est mis à jour sur place et le routeur le prend sans redémarrage. Rien à
+faire, tant que le cluster tourne à cette période.
+
+**Vérifier** l'état, la date d'expiration et la date de renouvellement prévue :
+
+```bash
+oc get certificate -n rhbk -o 'custom-columns=NAME:.metadata.name,READY:.status.conditions[0].status,EXPIRE:.status.notAfter,RENOUVELLEMENT:.status.renewalTime'
+```
+
+Ce que voient les navigateurs (date d'expiration du certificat présenté) :
+
+```bash
+for h in prod-rhbk prod-rhbk-admin; do echo | openssl s_client -connect $h.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com:443 -servername $h.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com 2>/dev/null | openssl x509 -noout -enddate; done
+```
+
+**Forcer un renouvellement** (certificat compromis, par exemple) : outil `cmctl` de
+cert-manager, `cmctl renew rhbk-route-tls -n <ns>` (non testé ici, `cmctl` n'est pas installé sur
+le poste). Let's Encrypt limite le nombre de certificats identiques (5 par semaine pour les mêmes noms) :
+ne pas le répéter inutilement.
+
+**Si l'émission échoue** (`READY False`, synchronisation ArgoCD bloquée sur le `Certificate`) :
+
+```bash
+oc describe certificate rhbk-route-tls -n rhbk-dev
+```
+
+```bash
+oc get certificaterequest,order,challenge -n rhbk-dev
+```
+
+Causes possibles : `ClusterIssuer` absent ou non prêt, challenge DNS en échec (droits Route 53 de
+l'émetteur), quota Let's Encrypt atteint. Tant que le Secret existant reste valide, les routes
+continuent de fonctionner.
+
+**Migration effectuée** (depuis l'ancien certificat acme.sh rangé dans Vault et copié par un
+ExternalSecret `rhbk-tls-secret`) : nouveau nom de Secret `rhbk-route-tls` pour éviter tout
+conflit avec le Secret de l'ExternalSecret (supprimé avec lui au `prune`) ; le Role du routeur a
+autorisé les deux noms le temps de la bascule. Mesuré en prod : synchronisation de 2 minutes
+(émission du certificat comprise), routes basculées ensuite ; quelques secondes pendant le
+rechargement du routeur où la route publique a servi le certificat par défaut du cluster (503),
+puis tout est revenu. Le chemin `secret/rhbk/<env>/tls` de Vault n'est plus utilisé.
+
 ## 16. Dépannage
 
 | Symptôme | Cause | Solution |
 |---|---|---|
 | Application en erreur : `the server could not find the requested resource` sur `Keycloak` | Opérateur absent du namespace (pas de CRD) | Faire installer l'opérateur RHBK dans le namespace. |
-| Routes refusées : `externalCertificate: Forbidden: router serviceaccount does not have permission` | Le Role ou le RoleBinding du routeur manque, ou le secret ne s'appelle pas `rhbk-tls-secret` | Vérifier `oc get role,rolebinding router-read-rhbk-tls -n <ns>` et le nom du secret. |
+| Routes refusées : `externalCertificate: Forbidden: router serviceaccount does not have permission` | Le Role ou le RoleBinding du routeur manque, ou le secret ne s'appelle pas `rhbk-route-tls` | Vérifier `oc get role,rolebinding router-read-rhbk-tls -n <ns>` et le nom du secret. |
+| Synchronisation bloquée sur le `Certificate` (`Progressing`), routes non créées | cert-manager n'obtient pas le certificat (émetteur absent, challenge DNS en échec, quota Let's Encrypt) | `oc describe certificate rhbk-route-tls -n <ns>`, puis `oc get certificaterequest,order,challenge -n <ns>` (section 15.12). |
 | Application bloquée en `Progressing`, routes `Missing` | ArgoCD attend que Keycloak soit Healthy (wave 1) avant de créer les routes (wave 2) | Regarder le pod Keycloak (ligne suivante). |
 | Pod `rhbk-<env>-0` en `ContainerCreating`, événement `FailedMount … secret "…" not found` | Le pod est resté sur une ancienne révision du StatefulSet qui monte un secret supprimé. Kubernetes ne remplace pas un pod de StatefulSet qui n'est jamais devenu Ready. | `oc delete pod rhbk-<env>-0 -n <ns>` : le StatefulSet le recrée avec la bonne révision. **Prévention** : lors d'une migration, ne supprimer un ancien secret qu'**après** la synchro. |
 | Pod Keycloak en `CrashLoopBackOff`, `Connection refused` vers PostgreSQL | Base arrêtée ou pas encore prête (par exemple au redémarrage du cluster) | Vérifier `oc get pods -n <ns>` ; Keycloak repart seul quand la base répond. |
@@ -2583,7 +2647,7 @@ oc get clustersecretstore vault-store
 ### A.7 Ranger les valeurs d'un environnement dans Vault
 
 Depuis le dossier de `rhbk-platform` (où se trouve `vault-init.json`), en indiquant
-l'environnement et les fichiers du certificat de cet environnement (annexe C). Les
+l'environnement. Les
 valeurs passent par l'entrée standard et un fichier temporaire supprimé aussitôt :
 
 ```bash
@@ -2592,20 +2656,17 @@ cd /usr/local/dev/rhbk-platform
 
 ```bash
 ENV=qualif
-CERT=/usr/local/dev/rhbk-gitops/cert/$ENV-rhbk.fullchain.pem
-KEY=/usr/local/dev/rhbk-gitops/cert/$ENV-rhbk.key.pem
 ```
 
 ```bash
 python3 -c "$(cat <<'EOF'
 import json, sys, getpass
-env, cert, key = sys.argv[1:4]
+env = sys.argv[1]
 ask = getpass.getpass  # prompts on the terminal (not on stdout), input not echoed
 tok = json.load(open("vault-init.json"))["root_token"]
 items = {
   f"rhbk/{env}/db": {"username": ask("db username: "), "password": ask("db password: ")},
   f"rhbk/{env}/bootstrap-admin": {"username": ask("admin username: "), "password": ask("admin password: ")},
-  f"rhbk/{env}/tls": {"tls.crt": open(cert).read(), "tls.key": open(key).read()},
 }
 print("set -e"); print(f"export VAULT_TOKEN={json.dumps(tok)}"); print("umask 077")
 for path, data in items.items():
@@ -2613,7 +2674,7 @@ for path, data in items.items():
     print(f"vault kv put -mount=secret {path} @/tmp/v.json >/dev/null && echo 'written {path}'")
 print("rm -f /tmp/v.json")
 EOF
-)" "$ENV" "$CERT" "$KEY" | oc exec -i -n vault vault-0 -- sh -s
+)" "$ENV" | oc exec -i -n vault vault-0 -- sh -s
 ```
 
 Les questions (`db username:`…) s'affichent dans le terminal ; rien n'est affiché à
@@ -2848,16 +2909,18 @@ oc exec -n rhbk-$ENV deploy/postgres-db -- bash -c 'PGPASSWORD=$POSTGRESQL_PASSW
 
 ---
 
-## 19. Annexe C : générer le certificat d'un environnement
+## 19. Annexe C : certificat manuel avec acme.sh (sans cert-manager)
 
-Les routes présentent un certificat Let's Encrypt, obtenu avec
-[acme.sh](https://github.com/acmesh-official/acme.sh) et un challenge DNS sur AWS
-Route 53 (le domaine `apps.<cluster>` est dans une zone Route 53 du sandbox). On génère
-**un certificat par environnement**, pour ses deux hostnames : pas besoin de
-régénérer celui des autres environnements.
+**Le dépôt utilise cert-manager** (étape 4, section 9.5) : cette annexe ne sert que sur un
+cluster **sans cert-manager**, ou en secours. Le certificat est alors obtenu à la main avec
+[acme.sh](https://github.com/acmesh-official/acme.sh) et un challenge DNS sur AWS Route 53, puis
+**à refaire avant chaque expiration (90 jours)**.
 
-Les certificats Let's Encrypt durent **90 jours**. cert-manager pourra automatiser le
-renouvellement plus tard ; en attendant, refaire cette annexe avant l'expiration.
+Pour l'utiliser à la place de cert-manager, dans chaque overlay : retirer `certificate.yaml` et
+créer le Secret `rhbk-route-tls` (type `kubernetes.io/tls`) à partir des fichiers obtenus, par
+exemple par un ExternalSecret qui lit `secret/rhbk/<env>/tls` dans Vault (c'était la méthode
+précédente du dépôt : voir l'historique git, fichier
+`overlays/prod/external-secrets/rhbk-tls-secret.yaml`, en changeant le nom du Secret cible).
 
 ### C.1 Prérequis
 
@@ -2895,7 +2958,7 @@ La validation DNS prend une à deux minutes.
 
 ### C.4 Copier le certificat et la clé
 
-Dans `cert/`, ignoré par git, avec les noms attendus par l'annexe A.7 :
+Dans `cert/`, ignoré par git :
 
 ```bash
 ./acme.sh --install-cert -d $ENV-rhbk.$DOMAIN --fullchain-file ../$ENV-rhbk.fullchain.pem --key-file ../$ENV-rhbk.key.pem
@@ -2913,14 +2976,13 @@ Les deux hostnames de l'environnement et la date d'expiration :
 openssl x509 -in ../$ENV-rhbk.fullchain.pem -noout -text | grep -E 'DNS:|Not After'
 ```
 
-Puis ranger le certificat dans Vault (annexe A.7, chemin `secret/rhbk/$ENV/tls`).
+Puis ranger le certificat (`tls.crt` = fullchain, `tls.key`) dans Vault, chemin `secret/rhbk/$ENV/tls` (interface web, ou `vault kv put`).
 
 ### C.6 Renouveler
 
 Même commande qu'en C.3 avec `--renew` à la place de `--issue` (ou `--force` pour
-renouveler avant la date prévue), puis C.4, puis remettre `tls` dans Vault (annexe A.7,
-section `tls` seulement, ou l'interface web) : ESO met `rhbk-tls-secret` à jour et le
-routeur prend le nouveau certificat sans redémarrage.
+renouveler avant la date prévue), puis C.4, puis remettre `tls` dans Vault : ESO met le Secret à
+jour et le routeur prend le nouveau certificat sans redémarrage.
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
