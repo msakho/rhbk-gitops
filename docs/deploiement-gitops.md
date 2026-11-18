@@ -2447,7 +2447,8 @@ conflit avec le Secret de l'ExternalSecret (supprimé avec lui au `prune`) ; le 
 autorisé les deux noms le temps de la bascule. Mesuré en prod : synchronisation de 2 minutes
 (émission du certificat comprise), routes basculées ensuite ; quelques secondes pendant le
 rechargement du routeur où la route publique a servi le certificat par défaut du cluster (503),
-puis tout est revenu. Le chemin `secret/rhbk/<env>/tls` de Vault n'est plus utilisé.
+puis tout est revenu. Ensuite supprimés : les chemins `secret/rhbk/<env>/tls` de Vault et le
+dossier local `cert/` (ancien certificat et clé privée).
 
 ## 16. Dépannage
 
