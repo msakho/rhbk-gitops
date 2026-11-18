@@ -1,0 +1,19 @@
+# Public certificate of the routes (Let's Encrypt), issued and renewed by cert-manager: renewal
+# about 30 days before expiry, Secret rhbk-route-tls updated in place, the router picks it up
+# without restart. ClusterIssuer provided by the sandbox (DNS-01 challenge on Route 53); on
+# another cluster, use its own ClusterIssuer. Wave 0: ArgoCD waits until the Certificate is
+# Ready before creating the routes (wave 2).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rhbk-route-tls
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  secretName: rhbk-route-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-production-ec2
+  dnsNames:
+    - dev-rhbk.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com
+    - dev-rhbk-admin.apps.cluster-nnljw.nnljw.sandbox742.opentlc.com

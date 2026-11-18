@@ -21,7 +21,7 @@ spec:
     termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
     externalCertificate:
-      name: rhbk-tls-secret
+      name: rhbk-route-tls
 ---
 apiVersion: route.openshift.io/v1
 kind: Route
@@ -44,7 +44,7 @@ spec:
     termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
     externalCertificate:
-      name: rhbk-tls-secret
+      name: rhbk-route-tls
 ---
 # Admin hostname: every path (the console needs /admin, /realms/master and /resources).
 apiVersion: route.openshift.io/v1
@@ -68,4 +68,4 @@ spec:
     termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
     externalCertificate:
-      name: rhbk-tls-secret
+      name: rhbk-route-tls

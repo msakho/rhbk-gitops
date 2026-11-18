@@ -11,6 +11,8 @@ resources:
   - ../../base/keycloak
   # ExternalSecrets from Vault (ClusterSecretStore vault-store, defined in the rhbk-platform repository).
   - external-secrets
+  # Public certificate of the routes (cert-manager).
+  - certificate.yaml
 
 patches:
   - path: patch-keycloak.yaml

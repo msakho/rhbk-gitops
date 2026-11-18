@@ -3,4 +3,3 @@ kind: Kustomization
 resources:
   - rhbk-db-secret.yaml
   - initial-admin-secret.yaml
-  - rhbk-tls-secret.yaml
