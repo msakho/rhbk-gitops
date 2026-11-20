@@ -4,6 +4,7 @@ Déploiement GitOps (OpenShift GitOps / ArgoCD) de Red Hat build of Keycloak 26.
 
 > Guide pas à pas pour reconstruire ce dépôt et le déployer : [docs/deploiement-gitops.md](docs/deploiement-gitops.md)
 > Observabilité, partie par partie (métriques et alertes, tableaux de bord, logs, traces) : [docs/observabilite.md](docs/observabilite.md)
+> Tout recréer sur un nouveau cluster (changement de domaine, sauvegarde et restauration) : [docs/reconstruction.md](docs/reconstruction.md)
 
 ## Arborescence
 
@@ -20,14 +21,15 @@ overlays/
     external-secrets/          ExternalSecrets : secrets lus dans Vault via ESO
 custom-rhbk/Containerfile      Image Keycloak optimisée (quay.io/msakho0/mskeycloak)
 tools/postgresql/              Hors ArgoCD : base PostgreSQL d'un environnement (guide, annexe B)
+tools/change-cluster.sh        Change le domaine du cluster dans les deux dépôts (docs/reconstruction.md)
 ```
 
 | | prod | dev |
 |---|---|---|
 | Namespace | `rhbk` | `rhbk-dev` |
 | Instance Keycloak | `rhbk-prod` | `rhbk-dev` |
-| Hostname public | `prod-rhbk.apps.cluster-nnljw…` | `dev-rhbk.apps.cluster-nnljw…` |
-| Hostname admin | `prod-rhbk-admin.apps.cluster-nnljw…` | `dev-rhbk-admin.apps.cluster-nnljw…` |
+| Hostname public | `prod-rhbk.<domaine des routes>` | `dev-rhbk.<domaine des routes>` |
+| Hostname admin | `prod-rhbk-admin.<domaine des routes>` | `dev-rhbk-admin.<domaine des routes>` |
 | Ressources (req / limit) | 2 CPU, 1250M / 2 CPU, 2250M | 500m, 1G / 1 CPU, 1500M |
 | Sync ArgoCD | manuelle | automatique |
 
